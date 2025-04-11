@@ -1,14 +1,14 @@
 #! /usr/bin/env python3
 #
-# Copyright (c) 2024 Joshua Watt
-#
+# SPDX-FileCopyrightText: Copyright (c) 2024 Joshua Watt
+# SPDX-FileType: SOURCE
 # SPDX-License-Identifier: MIT
 
 import typing
 from dataclasses import dataclass
 
 from rdflib import URIRef
-from rdflib.namespace import RDF, RDFS, OWL, SH, XSD, DefinedNamespace, Namespace
+from rdflib.namespace import OWL, RDF, RDFS, SH, XSD, DefinedNamespace, Namespace
 
 PATTERN_DATATYPES = [
     str(XSD.string),

@@ -1,9 +1,9 @@
-#
-# Copyright (c) 2024 Joshua Watt
-#
+# SPDX-FileCopyrightText: Copyright (c) 2024 Joshua Watt
+# SPDX-FileType: SOURCE
 # SPDX-License-Identifier: MIT
 
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
+
 from .utils import parametrize
 
 

@@ -1,14 +1,15 @@
-#
-# Copyright (c) 2024 Joshua Watt
-#
+# SPDX-FileCopyrightText: Copyright (c) 2024 Joshua Watt
+# SPDX-FileType: SOURCE
 # SPDX-License-Identifier: MIT
 
+import json
 import re
 import subprocess
-import json
+from pathlib import Path
+
 import jsonschema
 import pytest
-from pathlib import Path
+
 from testfixtures import jsonvalidation
 
 THIS_FILE = Path(__file__)

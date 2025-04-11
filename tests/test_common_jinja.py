@@ -1,11 +1,9 @@
-#
-# Copyright (c) 2024 Joshua Watt
-#
+# SPDX-FileCopyrightText: Copyright (c) 2024 Joshua Watt
+# SPDX-FileType: SOURCE
 # SPDX-License-Identifier: MIT
 
 import subprocess
 from pathlib import Path
-
 
 THIS_DIR = Path(__file__).parent
 

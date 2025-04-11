@@ -1,17 +1,17 @@
-#
-# Copyright (c) 2024 Joshua Watt
-#
+# SPDX-FileCopyrightText: Copyright (c) 2024 Joshua Watt
+# SPDX-FileType: SOURCE
 # SPDX-License-Identifier: MIT
 
 import json
 import os
-import pytest
 import shutil
 import subprocess
 import time
-from testfixtures.httpserver import HTTPTestServer
-
 from pathlib import Path
+
+import pytest
+
+from testfixtures.httpserver import HTTPTestServer
 
 THIS_FILE = Path(__file__)
 THIS_DIR = THIS_FILE.parent

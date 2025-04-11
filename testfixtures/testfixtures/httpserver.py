@@ -1,6 +1,5 @@
-#
-# Copyright (c) 2024 Joshua Watt
-#
+# SPDX-FileCopyrightText: Copyright (c) 2024 Joshua Watt
+# SPDX-FileType: SOURCE
 # SPDX-License-Identifier: MIT
 
 import socket
@@ -8,9 +7,8 @@ import subprocess
 import sys
 import tempfile
 import time
-
-from pathlib import Path
 from contextlib import closing
+from pathlib import Path
 
 
 def get_ephemeral_port(host):

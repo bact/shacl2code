@@ -1,19 +1,20 @@
 #! /usr/bin/env python3
 #
-# Copyright (c) 2024 Joshua Watt
-#
+# SPDX-FileCopyrightText: Copyright (c) 2024 Joshua Watt
+# SPDX-FileType: SOURCE
 # SPDX-License-Identifier: MIT
 
 import argparse
 import json
 import sys
 import urllib.request
-import rdflib
 from pathlib import Path
 
-from . import Model, UrlContext, ContextData
-from .version import VERSION
+import rdflib
+
+from . import ContextData, Model, UrlContext
 from .lang import LANGUAGES
+from .version import VERSION
 
 
 def main(args=None):

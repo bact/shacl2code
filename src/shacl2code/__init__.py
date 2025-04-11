@@ -1,4 +1,19 @@
-from .model import Model, ModelException  # noqa: F401
-from .urlcontext import UrlContext, ContextData  # noqa: F401
-from .main import main  # noqa: F401
-from .version import VERSION  # noqa: F401
+# SPDX-FileCopyrightText: Copyright (c) 2024 Joshua Watt
+# SPDX-FileType: SOURCE
+# SPDX-License-Identifier: MIT
+
+from .model import Model, ModelException
+from .urlcontext import ContextData, UrlContext
+
+# main has to be imported after UrlContext to avoid circular imports
+from .main import main
+from .version import VERSION
+
+__all__ = [
+    "main",
+    "Model",
+    "ModelException",
+    "ContextData",
+    "UrlContext",
+    "VERSION",
+]

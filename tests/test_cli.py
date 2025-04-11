@@ -1,13 +1,12 @@
-#
-# Copyright (c) 2024 Joshua Watt
-#
+# SPDX-FileCopyrightText: Copyright (c) 2024 Joshua Watt
+# SPDX-FileType: SOURCE
 # SPDX-License-Identifier: MIT
 
 import subprocess
 import sys
 
-from shacl2code.lang import LANGUAGES
 from shacl2code import VERSION
+from shacl2code.lang import LANGUAGES
 
 
 def test_shacl2code_exists():

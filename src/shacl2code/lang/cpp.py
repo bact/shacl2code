@@ -1,15 +1,14 @@
-#
-# Copyright (c) 2024 Joshua Watt
-#
+# SPDX-FileCopyrightText: Copyright (c) 2024 Joshua Watt
+# SPDX-FileType: SOURCE
 # SPDX-License-Identifier: MIT
-
-from .common import JinjaTemplateRender
-from .lang import language, TEMPLATE_DIR
-from ..version import VERSION
 
 import re
 import textwrap
 from pathlib import Path
+
+from ..version import VERSION
+from .common import JinjaTemplateRender
+from .lang import TEMPLATE_DIR, language
 
 
 def varname(*name):

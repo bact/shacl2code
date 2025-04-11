@@ -1,10 +1,11 @@
-#
-# Copyright (c) 2024 Joshua Watt
-#
+# SPDX-FileCopyrightText: Copyright (c) 2024 Joshua Watt
+# SPDX-FileType: SOURCE
 # SPDX-License-Identifier: MIT
 
-import pytest
 import itertools
+
+import pytest
+
 from shacl2code.model import common_prefix
 
 
