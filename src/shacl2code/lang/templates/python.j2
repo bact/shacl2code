@@ -33,6 +33,7 @@ from typing import (
     Set,
     Tuple,
     Type,
+    TypeVar,
     Union,
     cast,
 )
@@ -615,6 +616,7 @@ def register(
 
 register_lock = threading.Lock()
 NAMED_INDIVIDUALS: Set[str] = set()
+T_SHACLObject = TypeVar("T_SHACLObject", bound="SHACLObject") 
 
 
 @functools.total_ordering
@@ -1278,8 +1280,8 @@ class SHACLObjectSet(object):
                 yield child
 
     def foreach_type(
-        self, typ: Union[str, Type[SHACLObject]], *, match_subclass: bool = True
-    ) -> Iterable[SHACLObject]:
+        self, typ: Union[str, Type[T_SHACLObject]], *, match_subclass: bool = True
+    ) -> Iterable[T_SHACLObject]:
         """
         Iterate over each object of a specified type (or subclass there of)
 
@@ -1298,7 +1300,7 @@ class SHACLObjectSet(object):
 
         for exact, o in self.obj_by_type[typ]:
             if match_subclass or exact:
-                yield o
+                yield cast(T_SHACLObject, o)
 
     def merge(self, *objectsets) -> "SHACLObjectSet":
         """
