@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: MIT
 
 import json
+import os
 import pytest
 import re
 import subprocess
@@ -60,12 +61,17 @@ def build_lib(tmp_path_factory, model_server, tmpname, *, namespace=None):
         + extra_args,
         check=True,
     )
+    make_args = [
+        "make",
+        "-j" + str(multiprocessing.cpu_count()),
+        "CXXFLAGS=-Wall -Werror -g -save-temps",
+    ]
+    cxx = os.environ.get("CXX")
+    if cxx:
+        make_args.append(f"CXX={cxx}")
+
     subprocess.run(
-        [
-            "make",
-            "-j" + str(multiprocessing.cpu_count()),
-            "CXXFLAGS=-Wall -Werror -g -save-temps",
-        ],
+        make_args,
         check=True,
         cwd=tmp_directory,
     )
@@ -155,8 +161,10 @@ def compile_test(test_lib, tmp_path):
 
         prog = tmp_path / "prog"
         pkg_config_cmd = f"$({test_lib.pkg_config} --cflags --libs {test_lib.basename})"
+
+        cxx = os.environ.get("CXX", "g++")
         compile_cmd = [
-            "g++",
+            cxx,
             src,
             "-Wall",
             "-Werror",
@@ -166,18 +174,28 @@ def compile_test(test_lib, tmp_path):
         ]
 
         if static:
-            compile_cmd.extend(
-                [
-                    "-Wl,-Bstatic",
-                    pkg_config_cmd,
-                    "-Wl,-Bdynamic",
-                ]
-            )
+            # On macOS the linker doesn't support -Bstatic/-Bdynamic flags.
+            # Use the static archive directly when running on Darwin.
+            if os.uname().sysname == "Darwin":
+                static_lib = tmp_path.parent / (test_lib.directory.name) / "install" / "lib" / f"lib{test_lib.basename}.a"
+                pkg_cflags = f"$({test_lib.pkg_config} --cflags {test_lib.basename})"
+                compile_cmd.extend([
+                    pkg_cflags,
+                    str(static_lib),
+                ])
+            else:
+                compile_cmd.extend(
+                    [
+                        "-Wl,-Bstatic",
+                        pkg_config_cmd,
+                        "-Wl,-Bdynamic",
+                    ]
+                )
         else:
             compile_cmd.extend(
                 [
                     pkg_config_cmd,
-                    f"-Wl,-rpath={test_lib.rpath}",
+                    f"-Wl,-rpath,{test_lib.rpath}",
                 ]
             )
 
@@ -326,12 +344,17 @@ class TestOutput:
             check=True,
         )
 
+        make_args = [
+            "make",
+            "-j" + str(multiprocessing.cpu_count()),
+            "CXXFLAGS=-Wall -Werror -g -save-temps",
+        ]
+        cxx = os.environ.get("CXX")
+        if cxx:
+            make_args.append(f"CXX={cxx}")
+
         subprocess.run(
-            [
-                "make",
-                "-j" + str(multiprocessing.cpu_count()),
-                "CXXFLAGS=-Wall -Werror -g -save-temps",
-            ],
+            make_args,
             check=True,
             cwd=tmp_path,
         )
@@ -365,8 +388,10 @@ def test_headers(test_lib, tmp_path):
 
         prog = tmp_path / "prog"
         pkg_config_cmd = f"$({test_lib.pkg_config} --cflags --libs {test_lib.basename})"
+
+        cxx = os.environ.get("CXX", "g++")
         compile_cmd = [
-            "g++",
+            cxx,
             src,
             "-Wall",
             "-Werror",
@@ -374,7 +399,7 @@ def test_headers(test_lib, tmp_path):
             "-o",
             prog,
             pkg_config_cmd,
-            f"-Wl,-rpath={test_lib.rpath}",
+            f"-Wl,-rpath,{test_lib.rpath}",
         ]
 
         compile_script = tmp_path / "compile.sh"
