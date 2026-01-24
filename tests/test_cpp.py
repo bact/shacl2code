@@ -177,12 +177,20 @@ def compile_test(test_lib, tmp_path):
             # On macOS the linker doesn't support -Bstatic/-Bdynamic flags.
             # Use the static archive directly when running on Darwin.
             if os.uname().sysname == "Darwin":
-                static_lib = tmp_path.parent / (test_lib.directory.name) / "install" / "lib" / f"lib{test_lib.basename}.a"
+                static_lib = (
+                    tmp_path.parent
+                    / (test_lib.directory.name)
+                    / "install"
+                    / "lib"
+                    / f"lib{test_lib.basename}.a"
+                )
                 pkg_cflags = f"$({test_lib.pkg_config} --cflags {test_lib.basename})"
-                compile_cmd.extend([
-                    pkg_cflags,
-                    str(static_lib),
-                ])
+                compile_cmd.extend(
+                    [
+                        pkg_cflags,
+                        str(static_lib),
+                    ]
+                )
             else:
                 compile_cmd.extend(
                     [
