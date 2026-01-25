@@ -32,8 +32,14 @@ install: lib{{ basename }}.so lib{{ basename }}.a docs
 	$(INSTALL) -d $(DESTDIR)/$(PREFIX)/lib/pkgconfig
 
 	$(INSTALL) -m 0644 "{{ basename }}.pc" "$(DESTDIR)/$(PREFIX)/lib/pkgconfig/"
+ifeq ($(shell uname), Darwin)
+	# macOS sed requires backup extension or empty string
+	sed -i '' -e 's^@@PREFIX@@^$(PREFIX)^g' \
+		"$(DESTDIR)/$(PREFIX)/lib/pkgconfig/{{ basename }}.pc"
+else
 	sed -i -e 's^@@PREFIX@@^$(PREFIX)^g' \
 		"$(DESTDIR)/$(PREFIX)/lib/pkgconfig/{{ basename }}.pc"
+endif
 
 	# Headers
 	$(INSTALL) -d "$(DESTDIR)/$(PREFIX)/include/{{ basename }}"
