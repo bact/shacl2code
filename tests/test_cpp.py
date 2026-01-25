@@ -178,8 +178,7 @@ def compile_test(test_lib, tmp_path):
             # Use the static archive directly when running on Darwin.
             if os.uname().sysname == "Darwin":
                 static_lib = (
-                    tmp_path.parent
-                    / (test_lib.directory.name)
+                    test_lib.directory
                     / "install"
                     / "lib"
                     / f"lib{test_lib.basename}.a"
