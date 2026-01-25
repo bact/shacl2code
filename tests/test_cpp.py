@@ -114,7 +114,7 @@ def build_lib(tmp_path_factory, model_server, tmpname, *, namespace=None):
     pkg_config = tmp_directory / "pkg-config"
     pkg_config.write_text(textwrap.dedent(f"""\
             #! /bin/sh
-            export PKG_CONFIG_PATH="{ str(install_dir / 'lib' / 'pkgconfig') }"
+            export PKG_CONFIG_PATH="{str(install_dir / 'lib' / 'pkgconfig')}"
             exec pkg-config "$@"
             """))
     pkg_config.chmod(0o755)
@@ -1308,7 +1308,7 @@ def test_roundtrip(compile_test, tmp_path, roundtrip):
         SHACLObjectSet objs;
         {{
             std::ifstream infile;
-            infile.open("{ roundtrip }");
+            infile.open("{roundtrip}");
 
             JSONLDDeserializer d;
             d.read(infile, objs);
@@ -1316,7 +1316,7 @@ def test_roundtrip(compile_test, tmp_path, roundtrip):
         }}
         {{
             std::ofstream outfile;
-            outfile.open("{ out_file }");
+            outfile.open("{out_file}");
 
             JSONLDInlineSerializer s;
             s.write(outfile, objs);
@@ -1341,7 +1341,7 @@ def test_static(compile_test, tmp_path, roundtrip):
         SHACLObjectSet objs;
         {{
             std::ifstream infile;
-            infile.open("{ roundtrip }");
+            infile.open("{roundtrip}");
 
             JSONLDDeserializer d;
             d.read(infile, objs);
@@ -1349,7 +1349,7 @@ def test_static(compile_test, tmp_path, roundtrip):
         }}
         {{
             std::ofstream outfile;
-            outfile.open("{ out_file }");
+            outfile.open("{out_file}");
 
             JSONLDInlineSerializer s;
             s.write(outfile, objs);
@@ -1422,7 +1422,7 @@ def test_json_validation(passes, data, tmp_path, test_lib, test_context_url):
     data_file.write_text(json.dumps(data))
     p = subprocess.run(
         [
-            test_lib.bindir / f"{ test_lib.basename }-validate",
+            test_lib.bindir / f"{test_lib.basename}-validate",
             data_file,
         ]
     )
@@ -1441,7 +1441,7 @@ def test_json_types(passes, data, tmp_path, test_lib, test_context_url):
     data_file.write_text(json.dumps(data))
     p = subprocess.run(
         [
-            test_lib.bindir / f"{ test_lib.basename }-validate",
+            test_lib.bindir / f"{test_lib.basename}-validate",
             data_file,
         ]
     )
