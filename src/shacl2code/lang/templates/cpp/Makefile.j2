@@ -1,4 +1,8 @@
+ifeq ($(shell uname), Darwin)
+CXX?=clang++
+else
 CXX?=g++
+endif
 CPPFLAGS=
 CXXFLAGS=
 LDFLAGS=
