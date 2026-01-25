@@ -48,20 +48,6 @@ jobs:
         run: |
           brew update
           brew install doxygen gcc go graphviz
-      - name: Set C++ compiler on macOS
-        if: runner.os == 'macOS'
-        run: |
-          # Find the installed GNU g++ from Homebrew
-          if which g++-15 >/dev/null 2>&1; then
-            echo "CXX=g++-15" >> $GITHUB_ENV
-          elif which g++-14 >/dev/null 2>&1; then
-            echo "CXX=g++-14" >> $GITHUB_ENV
-          elif which g++-13 >/dev/null 2>&1; then
-            echo "CXX=g++-13" >> $GITHUB_ENV
-          else
-            echo "Warning: No GNU g++ found, using default g++ (which may be clang++)"
-            echo "CXX=g++" >> $GITHUB_ENV
-          fi
       - name: Build package
         run: |
           python -m build
