@@ -1,18 +1,18 @@
 # On macOS, g++ is often an alias to clang++, so try to find GNU g++ from Homebrew
 # Users can still override by setting CXX environment variable
 ifeq ($(shell uname), Darwin)
-    CXX_DETECTED := $(shell \
-        for v in 20 19 18 17 16 15 14 13 12 11 10; do \
-            if which g++-$$v >/dev/null 2>&1; then \
-                echo g++-$$v; \
-                break; \
-            fi; \
-        done)
-    ifneq ($(CXX_DETECTED),)
-        CXX?=$(CXX_DETECTED)
-    else
-        CXX?=g++
-    endif
+	CXX_DETECTED := $(shell \
+		for v in 20 19 18 17 16 15 14 13 12 11 10; do \
+			if which g++-$$v >/dev/null 2>&1; then \
+				echo g++-$$v; \
+				break; \
+			fi; \
+		done)
+	ifneq ($(CXX_DETECTED),)
+		CXX?=$(CXX_DETECTED)
+	else
+	CXX?=g++
+	endif
 else
     CXX?=g++
 endif
@@ -49,14 +49,9 @@ install: lib{{ basename }}.so lib{{ basename }}.a docs
 	$(INSTALL) -d $(DESTDIR)/$(PREFIX)/lib/pkgconfig
 
 	$(INSTALL) -m 0644 "{{ basename }}.pc" "$(DESTDIR)/$(PREFIX)/lib/pkgconfig/"
-ifeq ($(shell uname), Darwin)
-	# macOS sed requires backup extension or empty string
-	sed -i '' -e 's^@@PREFIX@@^$(PREFIX)^g' \
+	sed -i.bak -e 's^@@PREFIX@@^$(PREFIX)^g' \
 		"$(DESTDIR)/$(PREFIX)/lib/pkgconfig/{{ basename }}.pc"
-else
-	sed -i -e 's^@@PREFIX@@^$(PREFIX)^g' \
-		"$(DESTDIR)/$(PREFIX)/lib/pkgconfig/{{ basename }}.pc"
-endif
+	rm -f "$(DESTDIR)/$(PREFIX)/lib/pkgconfig/{{ basename }}.pc.bak"
 
 	# Headers
 	$(INSTALL) -d "$(DESTDIR)/$(PREFIX)/include/{{ basename }}"
