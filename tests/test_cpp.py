@@ -31,8 +31,8 @@ SPDX3_CONTEXT_URL = "https://spdx.github.io/spdx-3-model/context.json"
 def get_default_cxx():
     """
     Get the default C++ compiler.
-    On macOS, try to find GNU g++ (g++-15, g++-14, g++-13) from Homebrew
-    instead of using 'g++' which is an alias to clang++.
+    On macOS, try to find GNU g++ from Homebrew by discovering available versions
+    and picking the latest one, instead of using 'g++' which is an alias to clang++.
     On other platforms, use 'g++'.
     """
     # If CXX is already set in environment, use it
@@ -42,11 +42,28 @@ def get_default_cxx():
 
     # On macOS, g++ is often an alias to clang++, so we need to find the real GNU g++
     if os.uname().sysname == "Darwin":
-        # Try to find g++ from Homebrew in order of preference
-        for version in ["15", "14", "13"]:
-            compiler = f"g++-{version}"
-            if shutil.which(compiler):
-                return compiler
+        # Try to find g++ from Homebrew by listing available versions
+        homebrew_bin = Path("/opt/homebrew/bin")
+        if homebrew_bin.exists():
+            # Find all g++-* executables and extract version numbers
+            versions = []
+            for compiler_path in homebrew_bin.glob("g++-*"):
+                try:
+                    # Extract version number from g++-XX
+                    version_str = compiler_path.name[4:]  # Remove 'g++-' prefix
+                    version_num = int(version_str)
+                    versions.append((version_num, compiler_path.name))
+                except (ValueError, IndexError):
+                    # Skip if not a valid version number
+                    continue
+
+            # Sort by version number (descending) and pick the latest
+            if versions:
+                versions.sort(reverse=True)
+                latest_compiler = versions[0][1]
+                # Verify it's actually executable
+                if shutil.which(latest_compiler):
+                    return latest_compiler
 
     # Default to g++ on Linux or if no versioned g++ found on macOS
     return "g++"

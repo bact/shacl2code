@@ -1,19 +1,13 @@
 # On macOS, g++ is often an alias to clang++, so try to find GNU g++ from Homebrew
 # Users can still override by setting CXX environment variable
 ifeq ($(shell uname), Darwin)
-    # Try to find GNU g++ from Homebrew (g++-15, g++-14, or g++-13)
-    ifeq ($(shell which g++-15 2>/dev/null),)
-        ifeq ($(shell which g++-14 2>/dev/null),)
-            ifeq ($(shell which g++-13 2>/dev/null),)
-                CXX?=g++
-            else
-                CXX?=g++-13
-            endif
-        else
-            CXX?=g++-14
-        endif
+    # Find the latest g++ version from Homebrew by listing /opt/homebrew/bin/g++-*
+    # Extract version numbers, sort them, and pick the latest
+    HOMEBREW_GXX := $(shell ls /opt/homebrew/bin/g++-* 2>/dev/null | sed 's/.*g++-//' | sort -rn | head -n1)
+    ifneq ($(HOMEBREW_GXX),)
+        CXX?=g++-$(HOMEBREW_GXX)
     else
-        CXX?=g++-15
+        CXX?=g++
     endif
 else
     CXX?=g++
