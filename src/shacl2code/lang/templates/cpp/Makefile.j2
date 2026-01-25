@@ -31,24 +31,24 @@ install: lib{{ basename }}.so lib{{ basename }}.a docs
 	# Package Config
 	$(INSTALL) -d $(DESTDIR)/$(PREFIX)/lib/pkgconfig
 
-	$(INSTALL) -m 0644 {{ basename }}.pc $(DESTDIR)/$(PREFIX)/lib/pkgconfig/
+	$(INSTALL) -m 0644 "{{ basename }}.pc" "$(DESTDIR)/$(PREFIX)/lib/pkgconfig/"
 	sed -i -e 's^@@PREFIX@@^$(PREFIX)^g' \
-		$(DESTDIR)/$(PREFIX)/lib/pkgconfig/{{ basename }}.pc
+		"$(DESTDIR)/$(PREFIX)/lib/pkgconfig/{{ basename }}.pc"
 
 	# Headers
-	$(INSTALL) -d $(DESTDIR)/$(PREFIX)/include/{{ basename }}
+	$(INSTALL) -d "$(DESTDIR)/$(PREFIX)/include/{{ basename }}"
 	{%- for h in headers %}
-	$(INSTALL) -m 0644 {{ h }} $(DESTDIR)/$(PREFIX)/include/{{ basename }}/
+	$(INSTALL) -m 0644 "{{ h }}" "$(DESTDIR)/$(PREFIX)/include/{{ basename }}/"
 	{%- endfor %}
 
 	# Binaries
 	$(INSTALL) -d $(DESTDIR)/$(PREFIX)/bin
 
-	$(INSTALL) -m 0755 {{ basename }}-validate $(DESTDIR)/$(PREFIX)/bin/
+	$(INSTALL) -m 0755 "{{ basename }}-validate" "$(DESTDIR)/$(PREFIX)/bin/"
 
 	# Documentation
-	$(INSTALL) -d $(DESTDIR)/$(PREFIX)/share/doc/lib{{ basename }}
-	$(COPY) -R doc/ $(DESTDIR)/$(PREFIX)/share/doc/lib{{ basename }}/
+	$(INSTALL) -d "$(DESTDIR)/$(PREFIX)/share/doc/lib{{ basename }}"
+	$(COPY) -R doc/ "$(DESTDIR)/$(PREFIX)/share/doc/lib{{ basename }}/"
 
 %.o: %.cpp
 	@echo " [CC]  $<"
