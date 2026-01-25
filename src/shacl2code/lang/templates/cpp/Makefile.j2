@@ -1,12 +1,4 @@
-ifeq ($(shell uname), Darwin)
-CXX?=$(shell \
-	if command -v g++-15 >/dev/null 2>&1; then echo g++-15; \
-	elif command -v g++-14 >/dev/null 2>&1; then echo g++-14; \
-	elif command -v g++-13 >/dev/null 2>&1; then echo g++-13; \
-	else echo g++; fi)
-else
 CXX?=g++
-endif
 CPPFLAGS=
 CXXFLAGS=
 LDFLAGS=
@@ -30,33 +22,39 @@ clean:
 install: lib{{ basename }}.so lib{{ basename }}.a docs
 	# Library
 	$(INSTALL) -d $(DESTDIR)/$(PREFIX)/lib
-	$(INSTALL) -m 0755 lib{{ basename }}.so $(DESTDIR)/$(PREFIX)/lib/lib{{ basename }}.so.{{ lib_version }}
-	ln -sf lib{{ basename }}.so.{{ lib_version }} $(DESTDIR)/$(PREFIX)/lib/lib{{ basename }}.so
-	ln -sf lib{{ basename }}.so.{{ lib_version }} $(DESTDIR)/$(PREFIX)/lib/lib{{ basename }}.so.{{ lib_version.split(".")[0] }}
+	$(INSTALL) -m 0755 "lib{{ basename }}.so" "$(DESTDIR)/$(PREFIX)/lib/lib{{ basename }}.so.{{ lib_version }}"
+	ln -sf "lib{{ basename }}.so.{{ lib_version }}" "$(DESTDIR)/$(PREFIX)/lib/lib{{ basename }}.so"
+	ln -sf "lib{{ basename }}.so.{{ lib_version }}" "$(DESTDIR)/$(PREFIX)/lib/lib{{ basename }}.so.{{ lib_version.split(".")[0] }}"
 
-	$(INSTALL) -m 0644 lib{{ basename }}.a $(DESTDIR)/$(PREFIX)/lib/
+	$(INSTALL) -m 0644 "lib{{ basename }}.a" "$(DESTDIR)/$(PREFIX)/lib/"
 
 	# Package Config
 	$(INSTALL) -d $(DESTDIR)/$(PREFIX)/lib/pkgconfig
 
-	$(INSTALL) -m 0644 {{ basename }}.pc $(DESTDIR)/$(PREFIX)/lib/pkgconfig/
+	$(INSTALL) -m 0644 "{{ basename }}.pc" "$(DESTDIR)/$(PREFIX)/lib/pkgconfig/"
+ifeq ($(shell uname), Darwin)
+	# macOS sed requires backup extension or empty string
+	sed -i '' -e 's^@@PREFIX@@^$(PREFIX)^g' \
+		"$(DESTDIR)/$(PREFIX)/lib/pkgconfig/{{ basename }}.pc"
+else
 	sed -i -e 's^@@PREFIX@@^$(PREFIX)^g' \
-		$(DESTDIR)/$(PREFIX)/lib/pkgconfig/{{ basename }}.pc
+		"$(DESTDIR)/$(PREFIX)/lib/pkgconfig/{{ basename }}.pc"
+endif
 
 	# Headers
-	$(INSTALL) -d $(DESTDIR)/$(PREFIX)/include/{{ basename }}
+	$(INSTALL) -d "$(DESTDIR)/$(PREFIX)/include/{{ basename }}"
 	{%- for h in headers %}
-	$(INSTALL) -m 0644 {{ h }} $(DESTDIR)/$(PREFIX)/include/{{ basename }}/
+	$(INSTALL) -m 0644 "{{ h }}" "$(DESTDIR)/$(PREFIX)/include/{{ basename }}/"
 	{%- endfor %}
 
 	# Binaries
 	$(INSTALL) -d $(DESTDIR)/$(PREFIX)/bin
 
-	$(INSTALL) -m 0755 {{ basename }}-validate $(DESTDIR)/$(PREFIX)/bin/
+	$(INSTALL) -m 0755 "{{ basename }}-validate" "$(DESTDIR)/$(PREFIX)/bin/"
 
 	# Documentation
-	$(INSTALL) -d $(DESTDIR)/$(PREFIX)/share/doc/lib{{ basename }}
-	$(COPY) -R doc/ $(DESTDIR)/$(PREFIX)/share/doc/lib{{ basename }}/
+	$(INSTALL) -d "$(DESTDIR)/$(PREFIX)/share/doc/lib{{ basename }}"
+	$(COPY) -R doc/ "$(DESTDIR)/$(PREFIX)/share/doc/lib{{ basename }}/"
 
 %.o: %.cpp
 	@echo " [CC]  $<"
@@ -72,18 +70,18 @@ lib{{ basename }}.a: $(LIB_OBJS)
 	# otherwise the linker may only include object files that were actually
 	# referenced and the initializers will not run
 	@echo " [CXX]  lib{{ basename }}.static.o"
-	$(CXX) -r -o lib{{ basename }}.static.o $^
+	$(CXX) -r -o "lib{{ basename }}.static.o" $^
 	@echo " [AR]  $@"
-	$(AR) rcs $@ lib{{ basename }}.static.o
+	$(AR) rcs $@ "lib{{ basename }}.static.o"
 
 lib{{ basename }}.so: $(LIB_OBJS)
 	@echo " [LD]  $@"
 ifeq ($(shell uname), Darwin)
 	# macOS ld doesn't support -soname; avoid passing it and use -dynamiclib
 	# Set install_name to @rpath/... so client binaries can locate the library
-	$(CXX) -dynamiclib $(LDFLAGS) -Wl,-install_name,@rpath/lib{{ basename }}.so -o $@ $^
+	$(CXX) -dynamiclib $(LDFLAGS) '-Wl,-install_name,@rpath/lib{{ basename }}.so' -o $@ $^
 else
-	$(CXX) -shared -fPIC -Wl,-soname,lib{{ basename }}.so.{{ lib_version.split(".")[0] }} $(LDFLAGS) -o $@ $^
+	$(CXX) -shared -fPIC '-Wl,-soname,lib{{ basename }}.so.{{ lib_version.split(".")[0] }}' $(LDFLAGS) -o $@ $^
 endif
 
 {{ basename }}-validate: $(VALIDATE_OBJS) lib{{ basename }}.a
