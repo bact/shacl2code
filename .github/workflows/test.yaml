@@ -39,7 +39,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           brew update
-          brew install doxygen gcc go graphviz
+          brew install doxygen go graphviz
       - name: Build package
         run: |
           python -m build
