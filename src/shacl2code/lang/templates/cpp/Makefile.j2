@@ -1,8 +1,6 @@
 # On macOS, g++ is often an alias to clang++, so try to find GNU g++ from Homebrew
 # Users can still override by setting CXX environment variable
 ifeq ($(shell uname), Darwin)
-    # Find the latest g++ version from Homebrew using which (works on both Intel and Apple Silicon)
-    # Check versions from 20 down to 10 and pick the first one found
     CXX_DETECTED := $(shell \
         for v in 20 19 18 17 16 15 14 13 12 11 10; do \
             if which g++-$$v >/dev/null 2>&1; then \

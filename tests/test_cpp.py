@@ -3,17 +3,19 @@
 #
 # SPDX-License-Identifier: MIT
 
+from dataclasses import dataclass
+from enum import Enum
 import json
+import multiprocessing
 import os
-import pytest
+from pathlib import Path
 import re
 import shutil
 import subprocess
 import textwrap
-import multiprocessing
-from pathlib import Path
-from enum import Enum
-from dataclasses import dataclass
+
+import pytest
+
 from testfixtures import jsonvalidation
 
 THIS_FILE = Path(__file__)
@@ -31,31 +33,24 @@ SPDX3_CONTEXT_URL = "https://spdx.github.io/spdx-3-model/context.json"
 def get_default_cxx():
     """
     Get the default C++ compiler.
-    On macOS, try to find GNU g++ from Homebrew by discovering available versions
-    and picking the latest one, instead of using 'g++' which is an alias to clang++.
+    On macOS, try to find GNU g++ from Homebrew.
     On other platforms, use 'g++'.
     """
-    # If CXX is already set in environment, use it
     cxx = os.environ.get("CXX")
     if cxx:
         return cxx
 
-    # On macOS, g++ is often an alias to clang++, so we need to find the real GNU g++
     if os.uname().sysname == "Darwin":
-        # Try to find g++ from Homebrew by checking which versions are available
-        # This works on both Apple Silicon (/opt/homebrew/bin) and Intel (/usr/local/bin)
         versions = []
-        for version in range(20, 9, -1):  # Check versions 20 down to 10
+        for version in range(20, 9, -1):
             compiler = f"g++-{version}"
             if shutil.which(compiler):
                 versions.append((version, compiler))
 
-        # Return the latest version found
         if versions:
             versions.sort(reverse=True)
             return versions[0][1]
 
-    # Default to g++ on Linux or if no versioned g++ found on macOS
     return "g++"
 
 
