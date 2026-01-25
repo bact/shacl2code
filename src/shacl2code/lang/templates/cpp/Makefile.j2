@@ -1,13 +1,52 @@
 # On macOS, g++ is often an alias to clang++, so try to find GNU g++ from Homebrew
 # Users can still override by setting CXX environment variable
 ifeq ($(shell uname), Darwin)
-    # Find the latest g++ version from Homebrew by listing /opt/homebrew/bin/g++-*
-    # Extract version numbers, sort them, and pick the latest
-    HOMEBREW_GXX := $(shell ls /opt/homebrew/bin/g++-* 2>/dev/null | sed 's/.*g++-//' | sort -rn | head -n1)
-    ifneq ($(HOMEBREW_GXX),)
-        CXX?=g++-$(HOMEBREW_GXX)
+    # Find the latest g++ version from Homebrew using which (works on both Intel and Apple Silicon)
+    # Try versions from 20 down to 10
+    ifeq ($(shell which g++-20 2>/dev/null),)
+        ifeq ($(shell which g++-19 2>/dev/null),)
+            ifeq ($(shell which g++-18 2>/dev/null),)
+                ifeq ($(shell which g++-17 2>/dev/null),)
+                    ifeq ($(shell which g++-16 2>/dev/null),)
+                        ifeq ($(shell which g++-15 2>/dev/null),)
+                            ifeq ($(shell which g++-14 2>/dev/null),)
+                                ifeq ($(shell which g++-13 2>/dev/null),)
+                                    ifeq ($(shell which g++-12 2>/dev/null),)
+                                        ifeq ($(shell which g++-11 2>/dev/null),)
+                                            ifeq ($(shell which g++-10 2>/dev/null),)
+                                                CXX?=g++
+                                            else
+                                                CXX?=g++-10
+                                            endif
+                                        else
+                                            CXX?=g++-11
+                                        endif
+                                    else
+                                        CXX?=g++-12
+                                    endif
+                                else
+                                    CXX?=g++-13
+                                endif
+                            else
+                                CXX?=g++-14
+                            endif
+                        else
+                            CXX?=g++-15
+                        endif
+                    else
+                        CXX?=g++-16
+                    endif
+                else
+                    CXX?=g++-17
+                endif
+            else
+                CXX?=g++-18
+            endif
+        else
+            CXX?=g++-19
+        endif
     else
-        CXX?=g++
+        CXX?=g++-20
     endif
 else
     CXX?=g++

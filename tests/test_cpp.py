@@ -42,28 +42,18 @@ def get_default_cxx():
 
     # On macOS, g++ is often an alias to clang++, so we need to find the real GNU g++
     if os.uname().sysname == "Darwin":
-        # Try to find g++ from Homebrew by listing available versions
-        homebrew_bin = Path("/opt/homebrew/bin")
-        if homebrew_bin.exists():
-            # Find all g++-* executables and extract version numbers
-            versions = []
-            for compiler_path in homebrew_bin.glob("g++-*"):
-                try:
-                    # Extract version number from g++-XX
-                    version_str = compiler_path.name[4:]  # Remove 'g++-' prefix
-                    version_num = int(version_str)
-                    versions.append((version_num, compiler_path.name))
-                except (ValueError, IndexError):
-                    # Skip if not a valid version number
-                    continue
+        # Try to find g++ from Homebrew by checking which versions are available
+        # This works on both Apple Silicon (/opt/homebrew/bin) and Intel (/usr/local/bin)
+        versions = []
+        for version in range(20, 9, -1):  # Check versions 20 down to 10
+            compiler = f"g++-{version}"
+            if shutil.which(compiler):
+                versions.append((version, compiler))
 
-            # Sort by version number (descending) and pick the latest
-            if versions:
-                versions.sort(reverse=True)
-                latest_compiler = versions[0][1]
-                # Verify it's actually executable
-                if shutil.which(latest_compiler):
-                    return latest_compiler
+        # Return the latest version found
+        if versions:
+            versions.sort(reverse=True)
+            return versions[0][1]
 
     # Default to g++ on Linux or if no versioned g++ found on macOS
     return "g++"
