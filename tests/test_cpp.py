@@ -7,6 +7,7 @@ import json
 import os
 import pytest
 import re
+import shutil
 import subprocess
 import textwrap
 import multiprocessing
@@ -44,18 +45,8 @@ def get_default_cxx():
         # Try to find g++ from Homebrew in order of preference
         for version in ["15", "14", "13"]:
             compiler = f"g++-{version}"
-            try:
-                # Check if the compiler exists
-                result = subprocess.run(
-                    ["which", compiler],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                if result.returncode == 0:
-                    return compiler
-            except Exception:
-                continue
+            if shutil.which(compiler):
+                return compiler
 
     # Default to g++ on Linux or if no versioned g++ found on macOS
     return "g++"
