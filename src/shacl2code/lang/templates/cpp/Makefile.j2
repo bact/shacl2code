@@ -1,5 +1,9 @@
 ifeq ($(shell uname), Darwin)
-CXX?=clang++
+CXX?=$(shell \
+	if command -v g++-15 >/dev/null 2>&1; then echo g++-15; \
+	elif command -v g++-14 >/dev/null 2>&1; then echo g++-14; \
+	elif command -v g++-13 >/dev/null 2>&1; then echo g++-13; \
+	else echo g++; fi)
 else
 CXX?=g++
 endif
