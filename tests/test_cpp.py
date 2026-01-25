@@ -27,6 +27,40 @@ TEST_CONTEXT = THIS_DIR / "data" / "model" / "test-context.json"
 SPDX3_CONTEXT_URL = "https://spdx.github.io/spdx-3-model/context.json"
 
 
+def get_default_cxx():
+    """
+    Get the default C++ compiler.
+    On macOS, try to find GNU g++ (g++-15, g++-14, g++-13) from Homebrew
+    instead of using 'g++' which is an alias to clang++.
+    On other platforms, use 'g++'.
+    """
+    # If CXX is already set in environment, use it
+    cxx = os.environ.get("CXX")
+    if cxx:
+        return cxx
+
+    # On macOS, g++ is often an alias to clang++, so we need to find the real GNU g++
+    if os.uname().sysname == "Darwin":
+        # Try to find g++ from Homebrew in order of preference
+        for version in ["15", "14", "13"]:
+            compiler = f"g++-{version}"
+            try:
+                # Check if the compiler exists
+                result = subprocess.run(
+                    ["which", compiler],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if result.returncode == 0:
+                    return compiler
+            except Exception:
+                continue
+
+    # Default to g++ on Linux or if no versioned g++ found on macOS
+    return "g++"
+
+
 @dataclass
 class Lib:
     basename: str
@@ -66,9 +100,8 @@ def build_lib(tmp_path_factory, model_server, tmpname, *, namespace=None):
         "-j" + str(multiprocessing.cpu_count()),
         "CXXFLAGS=-Wall -Werror -g -save-temps",
     ]
-    cxx = os.environ.get("CXX")
-    if cxx:
-        make_args.append(f"CXX={cxx}")
+    cxx = get_default_cxx()
+    make_args.append(f"CXX={cxx}")
 
     subprocess.run(
         make_args,
@@ -162,7 +195,7 @@ def compile_test(test_lib, tmp_path):
         prog = tmp_path / "prog"
         pkg_config_cmd = f"$({test_lib.pkg_config} --cflags --libs {test_lib.basename})"
 
-        cxx = os.environ.get("CXX", "g++")
+        cxx = get_default_cxx()
         compile_cmd = [
             cxx,
             src,
@@ -356,9 +389,8 @@ class TestOutput:
             "-j" + str(multiprocessing.cpu_count()),
             "CXXFLAGS=-Wall -Werror -g -save-temps",
         ]
-        cxx = os.environ.get("CXX")
-        if cxx:
-            make_args.append(f"CXX={cxx}")
+        cxx = get_default_cxx()
+        make_args.append(f"CXX={cxx}")
 
         subprocess.run(
             make_args,
@@ -396,7 +428,7 @@ def test_headers(test_lib, tmp_path):
         prog = tmp_path / "prog"
         pkg_config_cmd = f"$({test_lib.pkg_config} --cflags --libs {test_lib.basename})"
 
-        cxx = os.environ.get("CXX", "g++")
+        cxx = get_default_cxx()
         compile_cmd = [
             cxx,
             src,
