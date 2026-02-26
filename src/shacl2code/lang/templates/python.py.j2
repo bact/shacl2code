@@ -6,6 +6,8 @@
 #
 # SPDX-License-Identifier: {{ spdx_license }}
 
+# flake8: noqa
+
 from __future__ import annotations
 
 import decimal
@@ -312,7 +314,7 @@ class IRIProp(Property):
 
 class ObjectProp(IRIProp):
     """
-    A scalar SHACL object property of a SHACL object
+    A scalar SHACL object property of an SHACL object
     """
 
     __slots__ = ("cls", "required")
@@ -709,7 +711,6 @@ class SHACLObjectMeta(type):
 
         attrs["_IRI"] = {p.pyname: p.iri for p in attrs["_OBJ_PY_PROPS"].values()}
 
-        global NAMED_INDIVIDUALS
 
         auto_ni = True
         if "AUTO_NAMED_INDIVIDUALS" in attrs:
@@ -1394,7 +1395,6 @@ class SHACLObjectSet(object):
         return self._link()
 
     def _link(self) -> Set[str]:
-        global NAMED_INDIVIDUALS
 
         self.missing_ids = set()
         visited: Set[SHACLObject] = set()
@@ -1507,7 +1507,7 @@ class SHACLObjectSet(object):
         """
         ref_counts: Dict[SHACLObject, int] = {}
 
-        def walk_callback(value: SHACLObject, path: List[str]) -> bool:
+        def walk_callback(value, path: List[str]) -> bool:
             nonlocal ref_counts
 
             if not isinstance(value, SHACLObject):
@@ -2838,7 +2838,27 @@ class {{ varname(*class.clsname) }}(
     ]
     {%- endif %}
 
+    # Type annotations for runtime classes (do not assign defaults)
+    __annotations__: Dict[str, Any] = {
+    {%- for prop in class.properties %}
+        "{{ varname(prop.varname) }}": Any,{%- endfor %}
+    }
+
+    {# Inject __dir__ so interactive shells and IDEs can see annotated properties #}
+    def __dir__(self):
+        try:
+            default = super().__dir__()
+        except Exception:
+            default = list(object.__dir__(self))
+        ann = getattr(self.__class__, "__annotations__", {})
+        keys = list(default)
+        keys.extend(ann.keys())
+        # Preserve order and uniqueness
+        return sorted(dict.fromkeys(keys))
+
+# Do not trim the final newline between classes; ensure proper blank lines
 {% endfor %}
+
 {{ '"' }}{{ '"' }}{{ '"' }}Format Guard"""
 # fmt: on
 

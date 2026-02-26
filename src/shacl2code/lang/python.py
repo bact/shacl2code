@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-from .common import BasicJinjaRender
+from .common import BasicJinjaRender, OutputFile
 from .lang import language, TEMPLATE_DIR
 
 import re
@@ -68,3 +68,47 @@ class PythonRender(BasicJinjaRender):
             "use_slots": use_slots,
             **self.__render_args,
         }
+
+    def get_outputs(self):
+        """
+        Emit both the runtime `.py` and the type stub `.pyi` alongside it.
+
+        Behavior:
+        - If output is `-` (stdout), only the `.py` is written to stdout.
+        - If output is a file path, write `<path>` with the runtime template and
+          `<path-with-.pyi-suffix>` with the stub template.
+        """
+        template_py = TEMPLATE_DIR / "python.py.j2"
+        template_pyi = TEMPLATE_DIR / "python.pyi.j2"
+
+        out = getattr(self, "_BasicJinjaRender__output", None)
+        if out is None:
+            # Fallback to default behavior
+            yield self._BasicJinjaRender__output, self._BasicJinjaRender__template, {}
+            return
+
+        # If output is stdout, only emit the runtime .py to stdout
+        if getattr(out, "path", None) == "-":
+            yield out, template_py, {}
+            return
+
+        # out.path may be a pathlib.Path or string
+        base = out.path
+        try:
+            from pathlib import Path
+
+            basep = Path(base)
+        except Exception:
+            basep = base
+
+        # Ensure the main runtime file uses the provided path as-is
+        yield out, template_py, {}
+
+        # Create a paired .pyi output next to the primary output
+        try:
+            pyi_path = basep.with_suffix(".pyi")
+        except Exception:
+            # If base is not path-like, append .pyi
+            pyi_path = str(base) + ".pyi"
+
+        yield OutputFile(pyi_path), template_pyi, {}

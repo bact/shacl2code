@@ -1,0 +1,79 @@
+# Generated Python binding stub from a SHACL model
+#
+# {{ disclaimer }}
+#
+# SPDX-License-Identifier: {{ spdx_license }}
+#
+"""Type stub template for generated Python bindings
+
+This file is a Jinja template that emits a `.pyi` stub alongside the
+runtime `.py` generated file so IDEs and type-checkers can see typed
+attributes without writing runtime defaults.
+"""
+from typing import Any, Dict, List, Optional, Union
+from datetime import datetime
+
+class ListProxy(List[Any]): ...
+class NodeKind: ...
+class SHACLExtensibleObject(SHACLObject): ...
+class SHACLObject: ...
+
+
+{%- set DATATYPE_PYTHON_ALIASES = {
+    "http://www.w3.org/2001/XMLSchema#string": "str",
+    "http://www.w3.org/2001/XMLSchema#anyURI": "str",
+    "http://www.w3.org/2001/XMLSchema#integer": "int",
+    "http://www.w3.org/2001/XMLSchema#positiveInteger": "int",
+    "http://www.w3.org/2001/XMLSchema#nonNegativeInteger": "int",
+    "http://www.w3.org/2001/XMLSchema#boolean": "bool",
+    "http://www.w3.org/2001/XMLSchema#decimal": "float",
+    "http://www.w3.org/2001/XMLSchema#dateTime": "datetime",
+    "http://www.w3.org/2001/XMLSchema#dateTimeStamp": "datetime",
+} -%}
+
+{% for class in classes %}
+class {{ varname(*class.clsname) }}(
+{%- if class.parent_ids %}
+    {%- for id in class.parent_ids -%}
+        {{- varname(*classes.get(id).clsname) }}{%- if not loop.last %}, {% endif -%}
+    {%- endfor -%}
+    {%- if class.is_extensible -%}, SHACLExtensibleObject{%- endif -%}
+{%- elif class.is_extensible -%}
+    SHACLExtensibleObject
+{%- else -%}
+    SHACLObject
+{%- endif -%}
+):
+    TYPE: str
+    {%- if context.compact_iri(class._id) != class._id %}
+    COMPACT_TYPE: Optional[str]
+    {%- endif %}
+    {%- if class.id_property %}
+    ID_ALIAS: Optional[str]
+    {%- endif %}
+    {%- if class.is_abstract %}
+    IS_ABSTRACT: bool
+    {%- endif %}
+    {%- if class.deprecated %}
+    IS_DEPRECATED: bool
+    {%- endif %}
+    NAMED_INDIVIDUALS: Dict[str, str]
+    {%- for prop in class.properties %}
+    {%- set is_list = prop.max_count is none or prop.max_count != 1 %}
+    {%- if prop.enum_values %}
+    {{ varname(prop.varname) }}: {% if is_list %}List[str]{% else %}Optional[str]{% endif %}
+    {%- elif prop.class_id %}
+    {%- set target = varname(*classes.get(prop.class_id).clsname) %}
+    {{ varname(prop.varname) }}: {% if is_list %}List[Union['{{ target }}', str]]{% else %}Optional[Union['{{ target }}', str]]{% endif %}
+    {%- else %}
+    {%- set dt = prop.datatype %}
+    {# Lookup the Python stub type for this datatype IRI; fallback to Any #}
+    {%- set _typ = DATATYPE_PYTHON_ALIASES.get(dt, 'Any') %}
+
+    {{ varname(prop.varname) }}: {% if is_list %}List[{{ _typ }}]{% else %}Optional[{{ _typ }}]{% endif %}
+    {%- endif %}
+    {%- endfor %}
+
+    def __dir__(self) -> List[str]: ...
+
+{%- endfor %}
