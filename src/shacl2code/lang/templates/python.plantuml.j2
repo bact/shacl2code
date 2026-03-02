@@ -1,0 +1,92 @@
+@startuml
+' Class diagram for the generated Python bindings
+'
+' {{ disclaimer }}
+'
+' SPDX-License-Identifier: {{ spdx_license }}
+
+hide empty members
+skinparam classAttributeIconSize 0
+skinparam class {
+    BackgroundColor White
+    BorderColor Black
+    ArrowColor Black
+}
+skinparam stereotypeCBackgroundColor LightYellow
+skinparam stereotypeABackgroundColor LightBlue
+
+{%- for class in classes %}
+{%- set cls_name = varname(*class.clsname) %}
+
+{% if class.is_abstract %}abstract {% endif %}class {{ cls_name }}{% if class.deprecated %} <<deprecated>>{% elif class.is_extensible %} <<extensible>>{% endif %} {
+{%- set ns = namespace(has_primitives=false) %}
+{%- for prop in class.properties %}
+{%- if not prop.class_id %}
+{%- set ns.has_primitives = true %}
+{%- endif %}
+{%- endfor %}
+{%- if class.named_individuals %}
+    .. Named Individuals ..
+{%- for member in class.named_individuals %}
+    {static} {{ member.varname }}
+{%- endfor %}
+{%- if ns.has_primitives %}
+    --
+{%- endif %}
+{%- endif %}
+{%- for prop in class.properties %}
+{%- if not prop.class_id %}
+    {%- if prop.enum_values %}
+        {%- set ptype = "str" %}
+    {%- else %}
+        {%- set ptype = DATATYPE_PYTHON_TYPES.get(prop.datatype, "Any") %}
+    {%- endif %}
+    {%- set min_m = prop.min_count if prop.min_count is not none else 0 %}
+    {%- set max_m = "*" if prop.max_count is none else prop.max_count|string %}
+    {%- if min_m == 0 and max_m == "1" %}
+        {%- set mult = "[0..1]" %}
+    {%- elif min_m == 1 and max_m == "1" %}
+        {%- set mult = "[1]" %}
+    {%- elif min_m == 0 %}
+        {%- set mult = "[*]" %}
+    {%- else %}
+        {%- set mult = "[" ~ min_m ~ ".." ~ max_m ~ "]" %}
+    {%- endif %}
+    + {{ varname(prop.varname) }} {{ mult }} : {{ ptype }}{% if prop.deprecated %} ~~deprecated~~{% endif %}
+
+{%- endif %}
+{%- endfor %}
+}
+{%- endfor %}
+
+' Inheritance relationships
+{%- for class in classes %}
+{%- set cls_name = varname(*class.clsname) %}
+{%- for parent_id in class.parent_ids %}
+{{ varname(*classes.get(parent_id).clsname) }} <|-- {{ cls_name }}
+{%- endfor %}
+{%- endfor %}
+
+' Associations (class-typed properties)
+{%- for class in classes %}
+{%- set cls_name = varname(*class.clsname) %}
+{%- for prop in class.properties %}
+{%- if prop.class_id %}
+{%- set target_name = varname(*classes.get(prop.class_id).clsname) %}
+{%- set min_m = prop.min_count if prop.min_count is not none else 0 %}
+{%- set max_m = "*" if prop.max_count is none else prop.max_count|string %}
+{%- if min_m == 0 and max_m == "1" %}
+{%- set mult = "0..1" %}
+{%- elif min_m == 1 and max_m == "1" %}
+{%- set mult = "1" %}
+{%- elif min_m == 0 %}
+{%- set mult = "*" %}
+{%- else %}
+{%- set mult = min_m ~ ".." ~ max_m %}
+{%- endif %}
+{{ cls_name }} --> "{{ mult }}" {{ target_name }} : {{ varname(prop.varname) }}
+{%- endif %}
+{%- endfor %}
+{%- endfor %}
+
+@enduml
