@@ -46,6 +46,13 @@ The available language bindings can be viewed by running:
 shacl2code list
 ```
 
+Each language may have language-specific options, which can be viewed by using
+`-h` option after the language name:
+
+```shell
+shacl2code generate python -h
+```
+
 ## Developing
 
 Developing on `shacl2code` is best done using a virtual environment. You can
