@@ -7,25 +7,33 @@
 import re
 import textwrap
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Tuple
 
 from ..version import VERSION
 from .common import JinjaTemplateRender
 from .lang import TEMPLATE_DIR, language
 
+if TYPE_CHECKING:
+    import argparse
 
-def varname(*name):
-    name = "_".join(name)
+    from ..model import Class, Model, Property
+
+
+def varname(*name: str) -> str:
+    """Convert names to a valid C++ identifier."""
+    joined = "_".join(name)
     # Any invalid characters at the beginning of the name are removed (except
     # "@")
-    name = re.sub(r"^[^a-zA-Z0-9_@]*", "", name)
+    joined = re.sub(r"^[^a-zA-Z0-9_@]*", "", joined)
     # Any other invalid characters are replaced with "_" (including "@")
-    name = re.sub(r"[^a-zA-Z0-9_]", "_", name)
+    joined = re.sub(r"[^a-zA-Z0-9_]", "_", joined)
     # Consolidate runs of "_" to a single one
-    name = re.sub(r"__+", "_", name)
-    return name
+    joined = re.sub(r"__+", "_", joined)
+    return joined
 
 
-def parent_cpp_classes(cls, classes):
+def parent_cpp_classes(cls: "Class", classes: Any) -> List[str]:
+    """Return the C++ parent class name list for a class."""
     if cls.parent_ids:
         parents = [varname(*classes.get(i).clsname) for i in cls.parent_ids]
     else:
@@ -37,20 +45,25 @@ def parent_cpp_classes(cls, classes):
     return parents
 
 
-def prop_is_list(prop):
+def prop_is_list(prop: "Property") -> bool:
+    """Return True if the property is a list (max_count != 1)."""
     return prop.max_count is None or prop.max_count != 1
 
 
-def id_str(s):
+def id_str(s: str) -> str:
+    """Replace non-alphanumeric characters with underscores."""
     return re.sub(r"[^a-zA-Z0-9_]", "_", s)
 
 
-def comment_wrap(s):
+def comment_wrap(s: str) -> str:
+    """Wrap a string in C++ comment markers."""
     return "\n".join(["*/", s, "/*"])
 
 
 @language("cpp")
 class CppRender(JinjaTemplateRender):
+    """Render C++ Language Bindings."""
+
     HELP = "C++ Language Bindings"
 
     SOURCES = (
@@ -94,18 +107,18 @@ class CppRender(JinjaTemplateRender):
         "walk.hpp",
     )
 
-    def __init__(self, args):
+    def __init__(self, args: Any) -> None:
         super().__init__(args)
-        self.basename = args.basename
-        self.namespace = args.namespace or id_str(args.basename.name)
-        self.lib_version = args.version
-        self.description = (
+        self.basename: Path = args.basename
+        self.namespace: str = args.namespace or id_str(args.basename.name)
+        self.lib_version: str = args.version
+        self.description: str = (
             args.description or f"shacl2code generated binding {args.basename.name}"
         )
-        self.macro_prefix = id_str("SHACL2CODE_" + self.basename.name).upper()
+        self.macro_prefix: str = id_str("SHACL2CODE_" + self.basename.name).upper()
 
     @classmethod
-    def get_arguments(cls, parser):
+    def get_arguments(cls, parser: "argparse.ArgumentParser") -> None:
         parser.add_argument(
             "--output",
             "-o",
@@ -133,8 +146,8 @@ class CppRender(JinjaTemplateRender):
             help="Library description",
         )
 
-    def get_outputs(self):
-        def suffix(s):
+    def get_outputs(self) -> Iterator[Tuple[Path, Path, Dict[str, Any]]]:
+        def suffix(s: str) -> Path:
             return self.basename.parent / (self.basename.name + s)
 
         t = TEMPLATE_DIR / "cpp"
@@ -179,7 +192,7 @@ class CppRender(JinjaTemplateRender):
         yield suffix(".pc"), t / "pkgconfig.pc.j2", {}
         yield self.basename.parent / "Doxyfile", t / "Doxyfile.j2", {}
 
-    def get_extra_env(self):
+    def get_extra_env(self) -> Dict[str, Any]:
         return {
             "varname": varname,
             "prop_is_list": prop_is_list,
@@ -203,7 +216,7 @@ class CppRender(JinjaTemplateRender):
             "ns_end": comment_wrap("\n".join("}" for n in self.namespace.split("::"))),
         }
 
-    def get_additional_render_args(self, model):
+    def get_additional_render_args(self, model: "Model") -> Dict[str, Any]:
         return {
             "basename": self.basename.name,
             "namespace": self.namespace,

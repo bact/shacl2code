@@ -7,9 +7,15 @@
 import re
 import textwrap
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Tuple
 
 from .common import JinjaTemplateRender
 from .lang import TEMPLATE_DIR, language
+
+if TYPE_CHECKING:
+    import argparse
+
+    from ..model import Class, Model, Property
 
 GO_KEYWORDS = (
     "break",
@@ -40,46 +46,53 @@ GO_KEYWORDS = (
 )
 
 
-def varname(*name, public=True):
-    new_name = []
+def varname(*name: str, public: bool = True) -> str:
+    """Convert names to a valid Go identifier."""
+    parts: List[str] = []
     for n in name:
         for s in re.split(r"[^a-zA-Z0-9]+", n):
             if not s:
                 continue
-            new_name.append(s)
+            parts.append(s)
     if public:
-        new_name = [s[0].upper() + s[1:] for s in new_name]
+        parts = [s[0].upper() + s[1:] for s in parts]
     else:
-        new_name = [new_name[0][0].lower() + new_name[0][1:]] + [
-            s[0].upper() + s[1:] for s in new_name[1:]
+        parts = [parts[0][0].lower() + parts[0][1:]] + [
+            s[0].upper() + s[1:] for s in parts[1:]
         ]
-    new_name = "".join(new_name)
-    if new_name in GO_KEYWORDS:
-        new_name = new_name + "_"
-    return new_name
+    joined = "".join(parts)
+    if joined in GO_KEYWORDS:
+        joined = joined + "_"
+    return joined
 
 
-def struct_name(cls):
+def struct_name(cls: "Class") -> str:
+    """Return the Go struct name for a class."""
     return varname(*cls.clsname) + "Object"
 
 
-def interface_name(cls):
+def interface_name(cls: "Class") -> str:
+    """Return the Go interface name for a class."""
     return varname(*cls.clsname)
 
 
-def class_type_var(cls):
+def class_type_var(cls: "Class") -> str:
+    """Return the private type variable name for a class."""
     return varname(*cls.clsname, public=False) + "Type"
 
 
-def prop_name(prop):
+def prop_name(prop: "Property") -> str:
+    """Return the camelCase property name."""
     return varname(prop.varname, public=False)
 
 
-def prop_is_list(prop):
+def prop_is_list(prop: "Property") -> bool:
+    """Return True if the property is a list (max_count != 1)."""
     return prop.max_count is None or prop.max_count != 1
 
 
-def prop_go_type(prop, classes):
+def prop_go_type(prop: "Property", classes: Any) -> str:
+    """Map a property to its Go type string."""
     if prop.enum_values:
         return "string"
 
@@ -117,11 +130,13 @@ def prop_go_type(prop, classes):
     raise Exception("Unknown data type " + prop.datatype)  # pragma: no cover
 
 
-def prop_ctx_name(cls, prop):
+def prop_ctx_name(cls: "Class", prop: "Property") -> str:
+    """Return the context variable name for a class property."""
     return varname(*cls.clsname, public=False) + varname(prop.varname) + "Context"
 
 
-def prop_decode_func(cls, prop, classes):
+def prop_decode_func(cls: "Class", prop: "Property", classes: Any) -> str:
+    """Generate the Go decode function call string for a property."""
     if prop.enum_values:
         func = "DecodeIRI"
 
@@ -164,7 +179,8 @@ def prop_decode_func(cls, prop, classes):
     return f"{func}(value, path, {prop_ctx_name(cls, prop)}, obj.{varname(prop.varname)}(), state)"
 
 
-def prop_encode_func(cls, prop, classes):
+def prop_encode_func(cls: "Class", prop: "Property", classes: Any) -> str:
+    """Generate the Go encode function call string for a property."""
     if prop.enum_values:
         func = "EncodeIRI"
 
@@ -209,6 +225,8 @@ def prop_encode_func(cls, prop, classes):
 
 @language("golang")
 class GoLangRender(JinjaTemplateRender):
+    """Render Go Language Bindings."""
+
     HELP = "Go Schema"
 
     FILES = (
@@ -233,10 +251,10 @@ class GoLangRender(JinjaTemplateRender):
         "validator.go",
     )
 
-    def __init__(self, args):
+    def __init__(self, args: Any) -> None:
         super().__init__(args)
-        self.__output = args.output
-        self.__render_args = {
+        self.__output: Path = args.output
+        self.__render_args: Dict[str, Any] = {
             # This variable adds as many lines are get commented out in jinja,
             # to keep the line numbers in the generated code the same as the
             # template
@@ -248,7 +266,7 @@ class GoLangRender(JinjaTemplateRender):
         }
 
     @classmethod
-    def get_arguments(cls, parser):
+    def get_arguments(cls, parser: "argparse.ArgumentParser") -> None:
         parser.add_argument(
             "-p",
             "--package",
@@ -263,13 +281,13 @@ class GoLangRender(JinjaTemplateRender):
             required=True,
         )
 
-    def get_outputs(self):
+    def get_outputs(self) -> Iterator[Tuple[Path, Path, Dict[str, Any]]]:
         t = TEMPLATE_DIR / "golang"
 
         for s in self.FILES:
             yield self.__output / s, t / (s + ".j2"), {}
 
-    def get_extra_env(self):
+    def get_extra_env(self) -> Dict[str, Any]:
         return {
             "varname": varname,
             "struct_name": struct_name,
@@ -283,5 +301,5 @@ class GoLangRender(JinjaTemplateRender):
             "prop_encode_func": prop_encode_func,
         }
 
-    def get_additional_render_args(self, model):
+    def get_additional_render_args(self, model: "Model") -> Dict[str, Any]:
         return self.__render_args

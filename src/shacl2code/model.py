@@ -4,11 +4,16 @@
 #
 # SPDX-License-Identifier: MIT
 
-import typing
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
 
 from rdflib import URIRef
 from rdflib.namespace import OWL, RDF, RDFS, SH, XSD, DefinedNamespace, Namespace
+
+if TYPE_CHECKING:
+    from rdflib import Graph
+
+    from .context import Context
 
 PATTERN_DATATYPES = [
     str(XSD.string),
@@ -30,7 +35,7 @@ class ModelException(Exception):
     pass
 
 
-def common_prefix(*s):
+def common_prefix(*s: str) -> str:
     if not s:
         return ""
 
@@ -49,7 +54,7 @@ def common_prefix(*s):
     return p1
 
 
-def remove_common_prefix(val, *cmp):
+def remove_common_prefix(val: str, *cmp: str) -> str:
     prefix = common_prefix(val, *cmp)
     return val[len(prefix) :]
 
@@ -66,9 +71,9 @@ class Property:
     path: str
     varname: str
     comment: str = ""
-    max_count: int = None
-    min_count: int = None
-    enum_values: list = field(default_factory=list)
+    max_count: Optional[int] = None
+    min_count: Optional[int] = None
+    enum_values: List[Any] = field(default_factory=list)
     class_id: str = ""
     datatype: str = ""
     pattern: str = ""
@@ -78,42 +83,44 @@ class Property:
 @dataclass
 class Class:
     _id: str
-    clsname: str
-    parent_ids: typing.List[str]
-    derived_ids: list
-    properties: typing.List[Property]
+    clsname: List[str]
+    parent_ids: List[str]
+    derived_ids: List[str]
+    properties: List[Property]
     comment: str = ""
     id_property: str = ""
-    node_kind: str = None
+    node_kind: Optional[URIRef] = None
     is_extensible: bool = False
     is_abstract: bool = False
-    named_individuals: list = None
+    named_individuals: List[Individual] = field(default_factory=list)
     deprecated: bool = False
 
 
 class Model(object):
-    def __init__(self, graph, context=None):
+    def __init__(self, graph: "Graph", context: "Context") -> None:
         self.model = graph
         self.context = context
-        self.compact_ids = {}
-        self.objects = {}
-        self.enums = []
-        self.classes = []
-        class_iris = set()
-        classes_by_iri = {}
+        self.compact_ids: Dict[str, str] = {}
+        self.objects: Any = {}
+        self.enums: List[Any] = []
+        self.classes: List[Class] = []
+        class_iris: Set[Any] = set()
+        classes_by_iri: Dict[str, Class] = {}
 
-        def int_val(v):
+        def int_val(v: Any) -> Optional[int]:
             if not v:
                 return None
             return int(v)
 
-        def str_val(v):
+        def str_val(v: Any) -> str:
             if v is None:
-                return v
+                return ""
             return str(v)
 
-        def get_inherited_value(subject, predicate, default=None):
-            def get_value(subject, predicate):
+        def get_inherited_value(
+            subject: Any, predicate: Any, default: Any = None
+        ) -> Any:
+            def get_value(subject: Any, predicate: Any) -> Any:
                 value = self.model.value(subject, predicate)
                 if value is not None:
                     return value
@@ -130,15 +137,15 @@ class Model(object):
                 return value
             return default
 
-        def set_prop_range(p, range_id):
+        def set_prop_range(p: Property, range_id: Any) -> bool:
             if range_id in class_iris:
                 p.class_id = str(range_id)
                 return True
 
             return False
 
-        def get_named_individuals(cls_iri):
-            members = []
+        def get_named_individuals(cls_iri: Any) -> List[Individual]:
+            members: List[Individual] = []
             for member_iri in self.model.subjects(RDF.type, cls_iri):
                 if (member_iri, RDF.type, OWL.NamedIndividual) not in self.model:
                     continue
@@ -146,16 +153,16 @@ class Model(object):
                 members.append(
                     Individual(
                         _id=str(member_iri),
-                        varname=remove_common_prefix(member_iri, cls_iri).lstrip("/"),
-                        comment=str(
-                            self.model.value(member_iri, RDFS.comment, default="")
-                        ),
+                        varname=remove_common_prefix(
+                            str(member_iri), str(cls_iri)
+                        ).lstrip("/"),
+                        comment=str(self.model.value(member_iri, RDFS.comment) or ""),
                     )
                 )
             members.sort(key=lambda i: i._id)
             return members
 
-        def is_abstract(s):
+        def is_abstract(s: Any) -> bool:
             if (
                 s,
                 RDF.type,
@@ -163,7 +170,7 @@ class Model(object):
             ) in self.model:
                 return True
 
-            if bool(self.model.value(s, SHACL2CODE.isAbstract, default=False)):
+            if bool(self.model.value(s, SHACL2CODE.isAbstract) or False):
                 return True
 
             return False
@@ -181,7 +188,7 @@ class Model(object):
                 ],
                 derived_ids=[],
                 clsname=self.get_class_name(cls_iri),
-                comment=str(self.model.value(cls_iri, RDFS.comment, default="")),
+                comment=str(self.model.value(cls_iri, RDFS.comment) or ""),
                 properties=[],
                 id_property=str_val(
                     get_inherited_value(cls_iri, SHACL2CODE.idPropertyName)
@@ -201,18 +208,19 @@ class Model(object):
             for obj_prop in self.model.objects(cls_iri, SH.property):
                 prop = self.model.value(obj_prop, SH.path)
                 if prop == RDF.type:
-                    for n in self.model.objects(obj_prop, SH["not"]):
+                    for n in self.model.objects(obj_prop, SH["not"]):  # type: ignore[index]
                         if (n, SH.hasValue, cls_iri) in self.model:
                             c.is_abstract = True
                     continue
 
-                varname = self.model.value(
-                    obj_prop,
-                    SH.name,
-                    default=self.get_compact_id(
+                varname = str(
+                    self.model.value(obj_prop, SH.name)
+                    or self.get_compact_id(
                         prop,
-                        fallback=remove_common_prefix(prop, cls_iri).lstrip("/"),
-                    ),
+                        fallback=remove_common_prefix(str(prop), str(cls_iri)).lstrip(
+                            "/"
+                        ),
+                    )
                 )
 
                 for p in c.properties:
@@ -222,7 +230,7 @@ class Model(object):
                     p = Property(
                         varname=varname,
                         path=str(prop),
-                        comment=str(self.model.value(prop, RDFS.comment, default="")),
+                        comment=str(self.model.value(prop, RDFS.comment) or ""),
                         deprecated=(prop, RDF.type, OWL.DeprecatedProperty)
                         in self.model,
                     )
@@ -237,11 +245,11 @@ class Model(object):
                 if (v := int_val(self.model.value(obj_prop, SH.minCount))) is not None:
                     p.min_count = v
 
-                if in_list := self.model.value(obj_prop, SH["in"]):
+                if in_list := self.model.value(obj_prop, SH["in"]):  # type: ignore[index]
                     enum_values = set(p.enum_values) | set(self.model.items(in_list))
                     p.enum_values = sorted(list(enum_values))
 
-                if range_id := self.model.value(obj_prop, SH["class"]):
+                if range_id := self.model.value(obj_prop, SH["class"]):  # type: ignore[index]
                     if not set_prop_range(p, range_id):
                         raise ModelException(
                             f"Prop {prop} has unknown class restriction {range_id}"
@@ -274,8 +282,8 @@ class Model(object):
             classes_by_iri[str(cls_iri)] = c
 
         for c in self.classes:
-            for p in c.parent_ids:
-                classes_by_iri[p].derived_ids.append(c._id)
+            for parent_id in c.parent_ids:
+                classes_by_iri[parent_id].derived_ids.append(c._id)
 
         for c in self.classes:
             c.derived_ids.sort()
@@ -284,7 +292,7 @@ class Model(object):
         self.classes.sort(key=lambda c: c._id)
 
         tmp_classes = self.classes
-        done_ids = set()
+        done_ids: Set[str] = set()
         self.classes = []
 
         while tmp_classes:
@@ -300,7 +308,7 @@ class Model(object):
             self.classes.append(c)
             done_ids.add(c._id)
 
-    def get_compact_id(self, _id, *, fallback=None):
+    def get_compact_id(self, _id: Any, *, fallback: Optional[str] = None) -> str:
         """
         Returns the "compacted" name of an object, that is the name of the
         object with the context applied
@@ -313,7 +321,7 @@ class Model(object):
             return fallback
         return self.compact_ids[_id]
 
-    def get_class_name(self, c):
+    def get_class_name(self, c: Any) -> List[str]:
         """
         Returns the name for a class that should be used in Code
         """

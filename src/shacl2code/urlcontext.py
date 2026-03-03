@@ -4,24 +4,28 @@
 #
 # SPDX-License-Identifier: MIT
 
-import typing
 from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
 from .context import Context
 
 
 @dataclass
 class ContextData:
-    context: typing.Dict
+    """Holds a JSON-LD context dict and the URL it was fetched from."""
+
+    context: Dict[str, Any]
     url: str
 
 
 class UrlContext(Context):
-    def __init__(self, contexts=None):
+    """A Context that tracks the source URLs of each context."""
+
+    def __init__(self, contexts: Optional[List[ContextData]] = None) -> None:
         if contexts is None:
             contexts = []  # pragma: no cover
 
         super().__init__([c.context.get("@context", {}) for c in contexts])
-        self.urls = []
+        self.urls: List[str] = []
         for ctx in contexts:
             self.urls.append(ctx.url)
