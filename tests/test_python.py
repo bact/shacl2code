@@ -38,6 +38,8 @@ SPDX3_CONTEXT_URL = "https://spdx.github.io/spdx-3-model/context.json"
 
 TEST_TZ = timezone(timedelta(hours=-2), name="TST")
 
+MODEL_VERSION = "1.0.0.alpha"
+
 
 def shacl2code_generate(args, python_args, outfile):
     return subprocess.run(
@@ -74,7 +76,10 @@ def python_model(tmp_path_factory, model_context_url):
             "--context",
             model_context_url,
         ],
-        [],
+        [
+            "--version",
+            MODEL_VERSION,
+        ],
         output_dir,
     )
     yield tmp_directory
@@ -130,6 +135,7 @@ MODEL_TESTS = [
             ["--include-main=no"],
             id="No main",
         ),
+        pytest.param(["--input", TEST_MODEL], ["--version=1.0.0"], id="Version"),
     ],
 ]
 
@@ -2014,3 +2020,10 @@ def test_introspection_extensible(model):
     # IRI-keyed extensible properties must NOT appear in dir()
     c["http://example.org/extensible-test-prop"] = "test-value"
     assert "http://example.org/extensible-test-prop" not in dir(c)
+
+
+def test_version(model):
+    from shacl2code.util import convert_version_string
+
+    assert model.VERSION_STRING == MODEL_VERSION
+    assert model.VERSION == convert_version_string(MODEL_VERSION)
