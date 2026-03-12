@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .common import JinjaTemplateRender
 from .lang import TEMPLATE_DIR, language
+from ..util import convert_version_string
 
 DATATYPE_CLASSES = {
     "http://www.w3.org/2001/XMLSchema#string": "StringProp",
@@ -67,6 +68,11 @@ class PythonRender(JinjaTemplateRender):
         self.__output = args.output
         self.__use_slots = args.use_slots
         self.__include_main = args.include_main == "yes"
+        self.__version_str = args.version
+        if args.version:
+            self.__version = repr(convert_version_string(args.version))
+        else:
+            self.__version = ""
 
     @classmethod
     def get_arguments(cls, parser):
@@ -91,6 +97,10 @@ class PythonRender(JinjaTemplateRender):
                 "Use __slot__ to reduce memory usage. "
                 "Slots prevents multiple inheritance. Default is %(default)s"
             ),
+        )
+        parser.add_argument(
+            "--version",
+            help="Specify model version",
         )
 
     def get_outputs(self):
@@ -124,4 +134,6 @@ class PythonRender(JinjaTemplateRender):
         return {
             "use_slots": use_slots,
             "include_main": self.__include_main,
+            "version_str": self.__version_str,
+            "version": self.__version,
         }
