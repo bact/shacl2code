@@ -60,7 +60,7 @@ class PythonRender(JinjaTemplateRender):
     FILES = (
         "__init__.py",
         "model.py",
-        "stub.pyi",
+        "model.pyi",
     )
 
     def __init__(self, args):

@@ -42,7 +42,7 @@ MODEL_VERSION = "1.0.0.alpha"
 
 
 def shacl2code_generate(args, python_args, outfile):
-    return subprocess.run(
+    p = subprocess.run(
         [
             "shacl2code",
             "generate",
@@ -59,6 +59,10 @@ def shacl2code_generate(args, python_args, outfile):
         encoding="utf-8",
     )
 
+    # Add a py.typed file for type checking
+    (outfile / "py.typed").touch()
+    return p
+
 
 @pytest.fixture(scope="module")
 def model_context_url(model_server):
@@ -68,7 +72,8 @@ def model_context_url(model_server):
 @pytest.fixture(scope="module")
 def python_model(tmp_path_factory, model_context_url):
     tmp_directory = tmp_path_factory.mktemp("pythontestcontext")
-    output_dir = tmp_directory / "model"
+    module_name = "pymodel"
+    output_dir = tmp_directory / module_name
     shacl2code_generate(
         [
             "--input",
@@ -82,22 +87,33 @@ def python_model(tmp_path_factory, model_context_url):
         ],
         output_dir,
     )
-    yield tmp_directory
+    yield tmp_directory, module_name
+
+
+@pytest.fixture
+def python_model_env(python_model):
+    module_path, module_name = python_model
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        env.get("PYTHONPATH", "").split(os.pathsep) + [str(module_path)]
+    )
+    return env, module_name
 
 
 @pytest.fixture(scope="module")
 def model_script(tmp_path_factory, python_model):
     tmp_directory = tmp_path_factory.mktemp("pythonmodelscript")
+    module_path, module_name = python_model
 
     script = tmp_directory / "script.py"
     script.write_text(textwrap.dedent(f"""\
         #! /usr/bin/env python3
         import sys
-        sys.path.append("{python_model}")
+        sys.path.append("{module_path}")
 
-        import model
+        import {module_name}
 
-        sys.exit(model.main())
+        sys.exit({module_name}.main())
         """))
     script.chmod(0o755)
     yield script
@@ -105,14 +121,16 @@ def model_script(tmp_path_factory, python_model):
 
 @pytest.fixture(scope="function")
 def model(python_model):
+    module_path, module_name = python_model
+
     old_path = sys.path[:]
-    sys.path.append(str(python_model))
+    sys.path.append(str(module_path))
     try:
         # Reload all model modules
         for m in list(sys.modules):
-            if m == "model" or m.startswith("model."):
+            if m == module_name or m.startswith(module_name + "."):
                 importlib.reload(sys.modules[m])
-        yield importlib.import_module("model")
+        yield importlib.import_module(module_name)
     finally:
         sys.path = old_path
 
@@ -187,10 +205,16 @@ class TestCheckType:
         """
         Mypy static type checking
         """
-        output_dir = tmp_path / "model"
+        output_dir = tmp_path / "pymodel"
         shacl2code_generate(args, python_args, output_dir)
         subprocess.run(
-            ["mypy"] + list(output_dir.iterdir()),
+            ["mypy", output_dir],
+            encoding="utf-8",
+            check=True,
+        )
+        # Run again on just the .py files
+        subprocess.run(
+            ["mypy"] + [f for f in output_dir.iterdir() if f.suffix == ".py"],
             encoding="utf-8",
             check=True,
         )
@@ -199,7 +223,7 @@ class TestCheckType:
         """
         Pyrefly static type checking
         """
-        output_dir = tmp_path / "model"
+        output_dir = tmp_path / "pymodel"
         shacl2code_generate(args, python_args, output_dir)
         subprocess.run(
             ["pyrefly", "check", "--search-path", tmp_path]
@@ -212,7 +236,7 @@ class TestCheckType:
         """
         Pyright static type checking
         """
-        output_dir = tmp_path / "model"
+        output_dir = tmp_path / "pymodel"
         shacl2code_generate(args, python_args, output_dir)
         subprocess.run(
             ["pyright"] + list(output_dir.iterdir()),
@@ -224,11 +248,57 @@ class TestCheckType:
         """
         Flake8 linting
         """
-        output_dir = tmp_path / "model"
+        output_dir = tmp_path / "pymodel"
         shacl2code_generate(args, python_args, output_dir)
         subprocess.run(
             ["flake8", "--config", TOP_DIR / ".flake8"] + list(output_dir.iterdir()),
             encoding="utf-8",
+            check=True,
+        )
+
+
+@pytest.fixture
+def python_usage_script(python_model_env, tmp_path):
+    env, module_name = python_model_env
+
+    script_path = tmp_path / "script.py"
+    script_path.write_text(textwrap.dedent(f"""
+            #! /usr/bin/env python3
+            import {module_name}
+
+            print({module_name}.enumType.foo)
+            """))
+
+    # Validate the script runs
+    subprocess.run([sys.executable, script_path], env=env, check=True)
+    yield env, script_path
+
+
+class TestUsageType:
+    def test_mypy(self, python_usage_script):
+        env, script_path = python_usage_script
+        subprocess.run(
+            ["mypy", script_path],
+            encoding="utf-8",
+            env=env,
+            check=True,
+        )
+
+    def test_pyright(self, python_usage_script):
+        env, script_path = python_usage_script
+        subprocess.run(
+            ["pyright", script_path],
+            encoding="utf-8",
+            env=env,
+            check=True,
+        )
+
+    def test_pyrefly(self, python_usage_script):
+        env, script_path = python_usage_script
+        subprocess.run(
+            ["pyrefly", "check", script_path],
+            encoding="utf-8",
+            env=env,
             check=True,
         )
 
@@ -290,17 +360,12 @@ def test_script_roundtrip(model_script, tmp_path, roundtrip):
     assert data == expect_data
 
 
-def test_module_roundtrip(python_model, tmp_path, roundtrip):
+def test_module_roundtrip(python_model_env, tmp_path, roundtrip):
+    env, module_name = python_model_env
+
     outpath = tmp_path / "out.json"
-
-    env = os.environ.copy()
-
-    env["PYTHONPATH"] = os.pathsep.join(
-        env.get("PYTHONPATH", "").split(os.pathsep) + [str(python_model)]
-    )
-
     subprocess.run(
-        [sys.executable, "-m", "model", roundtrip, "--outfile", outpath],
+        [sys.executable, "-m", module_name, roundtrip, "--outfile", outpath],
         check=True,
         env=env,
     )

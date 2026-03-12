@@ -17,6 +17,7 @@ from typing import (
     Iterator,
     List,
     Optional,
+    Set,
     Tuple,
     Type,
     TypeVar,
@@ -34,7 +35,8 @@ class NodeKind(Enum):
     BlankNodeOrIRI = 3
 
 
-class ListProxy(Generic[T_PropV]): ...
+class ListProxy(Generic[T_PropV]):
+    def __len__(self) -> int: ...
 
 
 class SHACLObject:
@@ -83,7 +85,7 @@ class SHACLObjectSet:
     def find_by_id(
         self, _id: str, default: Optional[SHACLObject] = None
     ) -> Optional[SHACLObject]: ...
-    def link(self) -> Any: ...
+    def link(self) -> Set[str]: ...
     def merge(self, *objectsets: SHACLObjectSet) -> SHACLObjectSet: ...
     def inline_blank_nodes(self) -> None: ...
     def foreach(self) -> Iterable[SHACLObject]: ...
