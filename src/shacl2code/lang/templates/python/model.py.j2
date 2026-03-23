@@ -1550,7 +1550,11 @@ class SHACLObjectSet(object):
         """
         Remove object from object set
 
-        Remove a SHACLObject from the object set and rebuild index
+        Remove a SHACLObject from the object set and rebuild index.
+
+        NOTE: The object might still be in the graph if it is
+        referenced by another object, but it will no longer be directly
+        accessible from the object set.
         """
         if not isinstance(obj, SHACLObject):
             raise TypeError("Object is not of type SHACLObject")
