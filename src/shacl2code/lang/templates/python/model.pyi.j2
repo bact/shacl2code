@@ -233,6 +233,11 @@ class ClassProp:
     deprecated: bool = ...
 
 
+class EncodeState: ...
+class DecodeState: ...
+class Encoder(ABC): ...
+class Decoder(ABC): ...
+
 T_SHACLObject = TypeVar("T_SHACLObject", bound="SHACLObject")
 
 
@@ -247,6 +252,8 @@ class SHACLObject:
     TYPE: ClassVar[str]
     COMPACT_TYPE: ClassVar[Optional[str]]
     PROPERTIES: ClassVar[List[ClassProp]]
+
+    _id: Optional[str]
 
     def __init__(self, **kwargs: Any) -> None: ...
     def get_type(self) -> str: ...
@@ -264,6 +271,19 @@ class SHACLObject:
     def iter_objects(
         self, *, recursive: bool = False, visited: Optional[Set[SHACLObject]] = None
     ) -> Iterable[SHACLObject]: ...
+    def encode(self, encoder: "Encoder", state: "EncodeState") -> None: ...
+    @classmethod
+    def _make_object(cls: Type[T_SHACLObject], typ: str) -> SHACLObject: ...
+    @classmethod
+    def decode(
+        cls: Type[T_SHACLObject], decoder: "Decoder", state: "DecodeState"
+    ) -> SHACLObject: ...
+    def link_helper(
+        self,
+        objectset: SHACLObjectSet,
+        missing: Optional[Set[str]],
+        visited: Set[SHACLObject],
+    ) -> None: ...
     def __hash__(self) -> int: ...
     def __eq__(self, other: Any) -> bool: ...
     def __lt__(self, other: Any) -> bool: ...
@@ -316,6 +336,14 @@ class SHACLObjectSet:
     def inline_blank_nodes(self) -> None: ...
     def expand_iri(self, iri: str, default: Optional[str] = None) -> Optional[str]: ...
     def compact_iri(self, iri: str, default: Optional[str] = None) -> Optional[str]: ...
+    def encode(
+        self, encoder: "Encoder", state: "EncodeState", force_at_graph: bool = False
+    ) -> None: ...
+    def decode(
+        self,
+        decoder: "Decoder",
+        state: Optional["DecodeState"] = None,
+    ) -> None: ...
 
 
 class JSONLDDeserializer:
@@ -403,8 +431,14 @@ class {{ varname(*class.clsname) }}(
 
     def __init__(
         self,
-        {%- if class.properties %}
+        {%- if class.is_extensible %}
+        typ: Optional[str] = None,
+        {%- endif %}
         *,
+        _id: Optional[str] = None,
+        {%- if class.id_property %}
+        {{ class.id_property }}: Optional[str] = None,
+        {%- endif %}
         {%- for prop in class.properties %}
         {%- set is_list = prop.max_count is none or prop.max_count != 1 %}
         {%- if prop.enum_values %}
@@ -420,10 +454,12 @@ class {{ varname(*class.clsname) }}(
         {{ varname(prop.varname) }}: Optional[{{ ptype }}] = None,
         {%- endif %}
         {%- endfor %}
-        {%- endif %}
         **kwargs: Any
     ) -> None: ...
 
+    {%- if class.id_property %}
+    {{ class.id_property }}: Optional[str]
+    {%- endif %}
     {%- for prop in class.properties %}
         {%- set is_list = prop.max_count is none or prop.max_count != 1 %}
         {%- if prop.enum_values %}
@@ -433,7 +469,14 @@ class {{ varname(*class.clsname) }}(
         {%- else %}
         {%- set ptype = DATATYPE_PYTHON_TYPES[prop.datatype] %}
         {%- endif %}
-    {{ varname(prop.varname) }}: {% if is_list %}ListProxy[{{ ptype }}]{% else %}Optional[{{ ptype }}]{% endif %}
+        {%- if is_list %}
+    @property
+    def {{ varname(prop.varname) }}(self) -> ListProxy[{{ ptype }}]: ...
+    @{{ varname(prop.varname) }}.setter
+    def {{ varname(prop.varname) }}(self, value: Iterable[{{ ptype }}]) -> None: ...
+        {%- else %}
+    {{ varname(prop.varname) }}: Optional[{{ ptype }}]
+        {%- endif %}
     {%- endfor %}
 
 {% endfor %}
