@@ -705,6 +705,11 @@ def test_id_name(model, test_context_url, cls):
         "testid": TEST_ID,
     }
 
+    # Also test initialization using ID alias
+    c2 = getattr(model, cls)(testid=TEST_ID)
+    assert c2._id == TEST_ID
+    assert c2.testid == TEST_ID
+
 
 SAME_AS_VALUE = object()
 
@@ -2113,6 +2118,9 @@ def test_introspection_extensible(model):
 
 
 def test_version(model):
+    """
+    Tests that the version string is correctly mapped.
+    """
     from shacl2code.util import convert_version_string
 
     assert model.VERSION_STRING == MODEL_VERSION
