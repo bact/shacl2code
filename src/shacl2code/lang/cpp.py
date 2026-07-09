@@ -5,7 +5,6 @@
 """C++ language binding renderer"""
 
 import re
-import textwrap
 from pathlib import Path
 
 from .common import JinjaTemplateRender
