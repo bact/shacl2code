@@ -85,52 +85,49 @@ def compile_test(test_lib, tmp_path):
 
         src = tmp_path / "test.go"
         import_str = "\n".join(f'    "{i}"' for i in imports)
-        src.write_text(
-            textwrap.dedent(f"""\
-                package main
+        prefix = f"""package main
 
-                import (
-                    "os"
-                    "model"
-                    "fmt"
-                {import_str}
-                )
+import (
+    "os"
+    "model"
+    "fmt"
+{import_str}
+)
 
-                func test() error {{
-                """)
-            + textwrap.dedent(code_fragment)
-            + textwrap.dedent("""\
+func test() error {{
+"""
+        code_frag = textwrap.dedent(code_fragment)
+        suffix = """
+    return nil
+}
 
-                    return nil
-                }
-
-                func convertRefUnchecked[TO model.SHACLObject, FROM model.SHACLObject](in model.Ref[FROM]) model.Ref[TO] {
-                    r, err := model.ConvertRef[TO, FROM](in)
-                    if err != nil {
-                        panic(err)
-                    }
-                    return r
-                }
+func convertRefUnchecked[TO model.SHACLObject, FROM model.SHACLObject](in model.Ref[FROM]) model.Ref[TO] {
+    r, err := model.ConvertRef[TO, FROM](in)
+    if err != nil {
+        panic(err)
+    }
+    return r
+}
 
 
-                func main() {
-                    // This is necessary so that the model import doesn't
-                    // generate an error
-                    model.IsIRI("")
-                    err := test()
-                    if err == nil {
-                        os.Exit(0)
-                    }
-                    switch err.(type) {
-                    case *model.ValidationError:
-                        fmt.Println("VALIDATION_FAILS", err)
-                    default:
-                        fmt.Println("ERROR", err)
-                    }
-                    os.Exit(1)
-                }
-                """)
-        )
+func main() {
+    // This is necessary so that the model import doesn't
+    // generate an error
+    model.IsIRI("")
+    err := test()
+    if err == nil {
+        os.Exit(0)
+    }
+    switch err.(type) {
+    case *model.ValidationError:
+        fmt.Println("VALIDATION_FAILS", err)
+    default:
+        fmt.Println("ERROR", err)
+    }
+    os.Exit(1)
+}
+"""
+        src.write_text(prefix + code_frag + suffix)
         subprocess.run(["go", "mod", "tidy"], cwd=tmp_path, check=True)
 
         prog = tmp_path / "prog"
@@ -235,40 +232,40 @@ def validate_test(test_lib, tmp_path_factory):
     )
 
     src = tmp_path / "validate.go"
-    src.write_text(textwrap.dedent("""\
-            package main
+    validate_code = """package main
 
-            import (
-                "os"
-                "model"
-                "fmt"
-                "encoding/json"
-            )
+import (
+    "os"
+    "model"
+    "fmt"
+    "encoding/json"
+)
 
-            func main() {
-                objset := model.NewSHACLObjectSet()
+func main() {
+    objset := model.NewSHACLObjectSet()
 
-                file, err := os.Open(os.Args[1])
-                if err != nil {
-                    fmt.Println(err)
-                    os.Exit(1)
-                }
-                defer file.Close()
+    file, err := os.Open(os.Args[1])
+    if err != nil {
+        fmt.Println(err)
+        os.Exit(1)
+    }
+    defer file.Close()
 
-                decoder := json.NewDecoder(file)
+    decoder := json.NewDecoder(file)
 
-                if err := objset.Decode(decoder); err != nil {
-                    fmt.Println(err)
-                    os.Exit(1)
-                }
+    if err := objset.Decode(decoder); err != nil {
+        fmt.Println(err)
+        os.Exit(1)
+    }
 
-                if ! objset.Validate(nil) {
-                    fmt.Println("Validation failed")
-                    os.Exit(1)
-                }
-                os.Exit(0)
-            }
-            """))
+    if ! objset.Validate(nil) {
+        fmt.Println("Validation failed")
+        os.Exit(1)
+    }
+    os.Exit(0)
+}
+"""
+    src.write_text(validate_code)
     subprocess.run(["go", "mod", "tidy"], cwd=tmp_path, check=True)
 
     prog = tmp_path / "validate"
@@ -308,47 +305,47 @@ def roundtrip_test(test_lib, tmp_path_factory):
     )
 
     src = tmp_path / "roundtrip.go"
-    src.write_text(textwrap.dedent("""\
-            package main
+    roundtrip_code = """package main
 
-            import (
-                "os"
-                "model"
-                "fmt"
-                "encoding/json"
-            )
+import (
+    "os"
+    "model"
+    "fmt"
+    "encoding/json"
+)
 
-            func main() {
-                objset := model.NewSHACLObjectSet()
+func main() {
+    objset := model.NewSHACLObjectSet()
 
-                in_file, err := os.Open(os.Args[1])
-                if err != nil {
-                    fmt.Println(err)
-                    os.Exit(1)
-                }
-                defer in_file.Close()
+    in_file, err := os.Open(os.Args[1])
+    if err != nil {
+        fmt.Println(err)
+        os.Exit(1)
+    }
+    defer in_file.Close()
 
-                decoder := json.NewDecoder(in_file)
+    decoder := json.NewDecoder(in_file)
 
-                if err := objset.Decode(decoder); err != nil {
-                    fmt.Println(err)
-                    os.Exit(1)
-                }
+    if err := objset.Decode(decoder); err != nil {
+        fmt.Println(err)
+        os.Exit(1)
+    }
 
-                out_file, err := os.Create(os.Args[2])
-                if err != nil {
-                    fmt.Println(err)
-                    os.Exit(1)
-                }
-                defer out_file.Close()
+    out_file, err := os.Create(os.Args[2])
+    if err != nil {
+        fmt.Println(err)
+        os.Exit(1)
+    }
+    defer out_file.Close()
 
-                encoder := json.NewEncoder(out_file)
-                if err := objset.Encode(encoder); err != nil {
-                    fmt.Println(err)
-                    os.Exit(1)
-                }
-            }
-            """))
+    encoder := json.NewEncoder(out_file)
+    if err := objset.Encode(encoder); err != nil {
+        fmt.Println(err)
+        os.Exit(1)
+    }
+}
+"""
+    src.write_text(roundtrip_code)
     subprocess.run(["go", "mod", "tidy"], cwd=tmp_path, check=True)
 
     prog = tmp_path / "roundtrip"
@@ -371,106 +368,106 @@ def roundtrip_test(test_lib, tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def link_test(test_lib, tmp_path_factory):
+    link_code = """package main
+
+import (
+    "os"
+    "model"
+    "fmt"
+    "encoding/json"
+)
+
+func main() {
+    objset := model.NewSHACLObjectSet()
+
+    in_file, err := os.Open(os.Args[1])
+    if err != nil {
+        fmt.Println(err)
+        os.Exit(1)
+    }
+    defer in_file.Close()
+
+    decoder := json.NewDecoder(in_file)
+
+    if err := objset.Decode(decoder); err != nil {
+        fmt.Println(err)
+        os.Exit(1)
+    }
+
+    if ! objset.Validate(nil) {
+        fmt.Println("Validation failed")
+        os.Exit(1)
+    }
+
+    var expect model.SHACLObject = nil
+    var check model.LinkClass = nil
+    objset.Objects(func (o model.SHACLObject) bool {
+        c, ok := o.(model.LinkClass)
+        if !ok {
+            return true
+        }
+
+        if c.ID().IsSet() && c.ID().Get() == os.Args[2] {
+            check = c
+        }
+
+        if c.LinkClassTag().IsSet() && c.LinkClassTag().Get() == os.Args[3] {
+            expect = c
+        }
+
+        return true
+    })
+
+    if check == nil {
+        fmt.Println("Unable to find node", os.Args[2])
+        os.Exit(1)
+    }
+
+    if expect == nil {
+        fmt.Println("Unable to find tag", os.Args[3])
+        os.Exit(1)
+    }
+
+    checkObject := func (name string, r model.Ref[model.LinkClass]) {
+        if r == nil {
+            fmt.Println("Reference is nil for ", name)
+            os.Exit(1)
+        }
+
+        if !r.IsObj() {
+            fmt.Println("Reference in", name, "does not refer to an object")
+            if r.IsIRI() {
+                fmt.Println("Reference has IRI", r.GetIRI())
+            } else {
+                fmt.Println("Reference is empty")
+            }
+            os.Exit(1)
+        }
+
+        o := r.GetObj()
+
+        if o == nil {
+            fmt.Println("Object for", name, "is nil")
+            os.Exit(1)
+        }
+
+        if o != expect {
+            fmt.Println("Wrong object for", name, ". Got", o.ID().Get(), "expected", expect.ID().Get())
+            os.Exit(1)
+        }
+    }
+
+    checkObject("LinkClassLinkProp", check.LinkClassLinkProp().Get())
+    checkObject("LinkClassLinkPropNoClass", check.LinkClassLinkPropNoClass().Get())
+    checkObject("LinkClassLinkListProp[0]", check.LinkClassLinkListProp().Get()[0])
+    checkObject("LinkClassLinkListProp[1]", check.LinkClassLinkListProp().Get()[1])
+}
+"""
     yield build_prog(
         test_lib,
         tmp_path_factory,
         "link",
-        textwrap.dedent("""\
-            package main
-
-            import (
-                "os"
-                "model"
-                "fmt"
-                "encoding/json"
-            )
-
-            func main() {
-                objset := model.NewSHACLObjectSet()
-
-                in_file, err := os.Open(os.Args[1])
-                if err != nil {
-                    fmt.Println(err)
-                    os.Exit(1)
-                }
-                defer in_file.Close()
-
-                decoder := json.NewDecoder(in_file)
-
-                if err := objset.Decode(decoder); err != nil {
-                    fmt.Println(err)
-                    os.Exit(1)
-                }
-
-                if ! objset.Validate(nil) {
-                    fmt.Println("Validation failed")
-                    os.Exit(1)
-                }
-
-                var expect model.SHACLObject = nil
-                var check model.LinkClass = nil
-                objset.Objects(func (o model.SHACLObject) bool {
-                    c, ok := o.(model.LinkClass)
-                    if !ok {
-                        return true
-                    }
-
-                    if c.ID().IsSet() && c.ID().Get() == os.Args[2] {
-                        check = c
-                    }
-
-                    if c.LinkClassTag().IsSet() && c.LinkClassTag().Get() == os.Args[3] {
-                        expect = c
-                    }
-
-                    return true
-                })
-
-                if check == nil {
-                    fmt.Println("Unable to find node", os.Args[2])
-                    os.Exit(1)
-                }
-
-                if expect == nil {
-                    fmt.Println("Unable to find tag", os.Args[3])
-                    os.Exit(1)
-                }
-
-                checkObject := func (name string, r model.Ref[model.LinkClass]) {
-                    if r == nil {
-                        fmt.Println("Reference is nil for ", name)
-                        os.Exit(1)
-                    }
-
-                    if !r.IsObj() {
-                        fmt.Println("Reference in", name, "does not refer to an object")
-                        if r.IsIRI() {
-                            fmt.Println("Reference has IRI", r.GetIRI())
-                        } else {
-                            fmt.Println("Reference is empty")
-                        }
-                        os.Exit(1)
-                    }
-
-                    o := r.GetObj()
-
-                    if o == nil {
-                        fmt.Println("Object for", name, "is nil")
-                        os.Exit(1)
-                    }
-
-                    if o != expect {
-                        fmt.Println("Wrong object for", name, ". Got", o.ID().Get(), "expected", expect.ID().Get())
-                        os.Exit(1)
-                    }
-                }
-
-                checkObject("LinkClassLinkProp", check.LinkClassLinkProp().Get())
-                checkObject("LinkClassLinkPropNoClass", check.LinkClassLinkPropNoClass().Get())
-                checkObject("LinkClassLinkListProp[0]", check.LinkClassLinkListProp().Get()[0])
-                checkObject("LinkClassLinkListProp[1]", check.LinkClassLinkListProp().Get()[1])
-            }
-            """),
+        link_code,
     )
 
 

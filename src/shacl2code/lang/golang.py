@@ -236,15 +236,16 @@ class GoLangRender(JinjaTemplateRender):
     def __init__(self, args):
         super().__init__(args)
         self.__output = args.output
+        go_package = f"""
+*/
+
+package {args.package}
+/*"""
         self.__render_args = {
             # This variable adds as many lines are get commented out in jinja,
             # to keep the line numbers in the generated code the same as the
             # template
-            "go_package": textwrap.dedent(f"""
-                */
-
-                package {args.package}
-                /*"""),
+            "go_package": textwrap.dedent(go_package),
         }
 
     @classmethod

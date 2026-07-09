@@ -144,11 +144,9 @@ class CppRender(JinjaTemplateRender):
 
         for s in self.HEADERS:
             guard = f"_{self.macro_prefix}_{id_str(s).upper()}"
+            guard_begin = f"#ifndef {guard}\n#define {guard}\n"
             yield self.basename.parent / s, t / (s + ".j2"), {
-                "guard_begin": comment_wrap(textwrap.dedent(f"""\
-                        #ifndef {guard}
-                        #define {guard}
-                        """)),
+                "guard_begin": comment_wrap(guard_begin),
                 "guard_end": comment_wrap(f"#endif // {guard}"),
             }
 
@@ -180,23 +178,25 @@ class CppRender(JinjaTemplateRender):
         yield self.basename.parent / "Doxyfile", t / "Doxyfile.j2", {}
 
     def get_extra_env(self):
+        api_def_begin = f"""\
+#ifndef DOXYGEN_SKIP
+#include "api.hpp"
+// These are so that we don't have to use Jinja templates below since that messes up the formatting
+#define EXPORT {self.macro_prefix}_API
+#define LOCAL  {self.macro_prefix}_LOCAL
+#endif // DOXYGEN_SKIP
+"""
+        api_def_end = """\
+#undef EXPORT
+#undef LOCAL
+"""
         return {
             "varname": varname,
             "prop_is_list": prop_is_list,
             "parent_cpp_classes": parent_cpp_classes,
             "macro_prefix": self.macro_prefix,
-            "api_def_begin": comment_wrap(textwrap.dedent(f"""\
-                    #ifndef DOXYGEN_SKIP
-                    #include "api.hpp"
-                    // These are so that we don't have to use Jinja templates below since that messes up the formatting
-                    #define EXPORT {self.macro_prefix}_API
-                    #define LOCAL  {self.macro_prefix}_LOCAL
-                    #endif // DOXYGEN_SKIP
-                    """)),
-            "api_def_end": comment_wrap(textwrap.dedent("""\
-                    #undef EXPORT
-                    #undef LOCAL
-                    """)),
+            "api_def_begin": comment_wrap(api_def_begin),
+            "api_def_end": comment_wrap(api_def_end),
             "ns_begin": comment_wrap(
                 "\n".join(f"namespace {n} {{" for n in self.namespace.split("::"))
             ),

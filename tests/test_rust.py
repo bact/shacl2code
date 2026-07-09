@@ -48,16 +48,16 @@ def _build_rust_prog(test_lib, tmp_path, name, code):
     (tmp_path / "src").mkdir(exist_ok=True)
 
     cargo_toml = tmp_path / "Cargo.toml"
-    cargo_toml.write_text(textwrap.dedent(f"""\
-            [package]
-            name = "{name}"
-            version = "0.1.0"
-            edition = "2021"
+    cargo_toml_content = f"""[package]
+name = "{name}"
+version = "0.1.0"
+edition = "2021"
 
-            [dependencies]
-            shacl_model = {{ path = "{test_lib}" }}
-            serde_json = "1"
-            """))
+[dependencies]
+shacl_model = {{ path = "{test_lib}" }}
+serde_json = "1"
+"""
+    cargo_toml.write_text(cargo_toml_content)
 
     src = tmp_path / "src" / "main.rs"
     src.write_text(code)
@@ -110,50 +110,47 @@ def compile_test(test_lib, tmp_path):
         (tmp_path / "src").mkdir(exist_ok=True)
 
         cargo_toml = tmp_path / "Cargo.toml"
-        cargo_toml.write_text(textwrap.dedent(f"""\
-                [package]
-                name = "test_prog"
-                version = "0.1.0"
-                edition = "2021"
+        cargo_toml_content = f"""[package]
+name = "test_prog"
+version = "0.1.0"
+edition = "2021"
 
-                [dependencies]
-                shacl_model = {{ path = "{test_lib}" }}
-                serde_json = "1"
-                chrono = {{ version = "0.4.31", features = ["serde"] }}
-                """))
+[dependencies]
+shacl_model = {{ path = "{test_lib}" }}
+serde_json = "1"
+chrono = {{ version = "0.4.31", features = ["serde"] }}
+"""
+        cargo_toml.write_text(cargo_toml_content)
 
         src = tmp_path / "src" / "main.rs"
-        src.write_text(
-            textwrap.dedent("""\
-                use shacl_model::*;
-                use std::process;
+        prefix = """use shacl_model::*;
+use std::process;
 
-                fn test_func() -> Result<(), shacl_model::Error> {
-                """)
-            + textwrap.dedent(code_fragment)
-            + textwrap.dedent("""\
+fn test_func() -> Result<(), shacl_model::Error> {
+"""
+        code_frag = textwrap.dedent(code_fragment)
+        suffix = """
+    Ok(())
+}
 
-                    Ok(())
+fn main() {
+    match test_func() {
+        Ok(()) => process::exit(0),
+        Err(e) => {
+            match &e {
+                shacl_model::Error::Validation(_, _) => {
+                    eprintln!("VALIDATION_FAILS {}", e);
                 }
-
-                fn main() {
-                    match test_func() {
-                        Ok(()) => process::exit(0),
-                        Err(e) => {
-                            match &e {
-                                shacl_model::Error::Validation(_, _) => {
-                                    eprintln!("VALIDATION_FAILS {}", e);
-                                }
-                                _ => {
-                                    eprintln!("ERROR {}", e);
-                                }
-                            }
-                            process::exit(1);
-                        }
-                    }
+                _ => {
+                    eprintln!("ERROR {}", e);
                 }
-                """)
-        )
+            }
+            process::exit(1);
+        }
+    }
+}
+"""
+        src.write_text(prefix + code_frag + suffix)
 
         p = subprocess.run(
             ["cargo", "build", "--release"],
@@ -206,32 +203,32 @@ def validate_test(test_lib, tmp_path_factory):
     """Build a validation program that reads JSON-LD and validates it."""
     tmp_path = tmp_path_factory.mktemp("validate")
 
+    validate_code = """use shacl_model::*;
+use std::fs::File;
+use std::io::BufReader;
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let file = File::open(&args[1]).expect("Failed to open file");
+    let reader = BufReader::new(file);
+
+    let mut objset = SHACLObjectSet::new();
+    if let Err(e) = objset.decode(reader) {
+        eprintln!("Decode error: {}", e);
+        std::process::exit(1);
+    }
+
+    if !objset.validate(None) {
+        eprintln!("Validation failed");
+        std::process::exit(1);
+    }
+}
+"""
     prog = _build_rust_prog(
         test_lib,
         tmp_path,
         "validate",
-        textwrap.dedent("""\
-            use shacl_model::*;
-            use std::fs::File;
-            use std::io::BufReader;
-
-            fn main() {
-                let args: Vec<String> = std::env::args().collect();
-                let file = File::open(&args[1]).expect("Failed to open file");
-                let reader = BufReader::new(file);
-
-                let mut objset = SHACLObjectSet::new();
-                if let Err(e) = objset.decode(reader) {
-                    eprintln!("Decode error: {}", e);
-                    std::process::exit(1);
-                }
-
-                if !objset.validate(None) {
-                    eprintln!("Validation failed");
-                    std::process::exit(1);
-                }
-            }
-            """),
+        validate_code,
     )
 
     def f(path, passes):
@@ -255,30 +252,30 @@ def roundtrip_test(test_lib, tmp_path_factory):
     """Build a roundtrip program that reads JSON-LD, decodes, re-encodes."""
     tmp_path = tmp_path_factory.mktemp("roundtrip")
 
+    roundtrip_code = """use shacl_model::*;
+use std::fs::File;
+use std::io::{BufReader, BufWriter};
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+
+    let in_file = File::open(&args[1]).expect("Failed to open input file");
+    let reader = BufReader::new(in_file);
+
+    let mut objset = SHACLObjectSet::new();
+    objset.decode(reader).expect("Failed to decode");
+
+    let out_file = File::create(&args[2]).expect("Failed to create output file");
+    let writer = BufWriter::new(out_file);
+
+    objset.encode(writer).expect("Failed to encode");
+}
+"""
     prog = _build_rust_prog(
         test_lib,
         tmp_path,
         "roundtrip",
-        textwrap.dedent("""\
-            use shacl_model::*;
-            use std::fs::File;
-            use std::io::{BufReader, BufWriter};
-
-            fn main() {
-                let args: Vec<String> = std::env::args().collect();
-
-                let in_file = File::open(&args[1]).expect("Failed to open input file");
-                let reader = BufReader::new(in_file);
-
-                let mut objset = SHACLObjectSet::new();
-                objset.decode(reader).expect("Failed to decode");
-
-                let out_file = File::create(&args[2]).expect("Failed to create output file");
-                let writer = BufWriter::new(out_file);
-
-                objset.encode(writer).expect("Failed to encode");
-            }
-            """),
+        roundtrip_code,
     )
 
     def f(in_path, out_path):
@@ -296,106 +293,106 @@ def link_test(test_lib, tmp_path_factory):
     """Build a link test program that checks reference resolution."""
     tmp_path = tmp_path_factory.mktemp("link")
 
+    link_code = """use shacl_model::*;
+use std::fs::File;
+use std::io::BufReader;
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+
+    let file = File::open(&args[1]).expect("Failed to open file");
+    let reader = BufReader::new(file);
+
+    let mut objset = SHACLObjectSet::new();
+    objset.decode(reader).expect("Failed to decode");
+
+    if !objset.validate(None) {
+        eprintln!("Validation failed");
+        std::process::exit(1);
+    }
+
+    // Find the check object by ID (args[2]) and the expected object by tag (args[3])
+    let mut check_idx: Option<usize> = None;
+    let mut expect_idx: Option<usize> = None;
+
+    for (idx, obj) in objset.objects().iter().enumerate() {
+        if let Some(lc) = obj.downcast_ref::<LinkClass>() {
+            if let Some(id) = lc.id() {
+                if id == args[2] {
+                    check_idx = Some(idx);
+                }
+            }
+            if let Some(ref tag) = lc.link_class_tag {
+                if *tag == args[3] {
+                    expect_idx = Some(idx);
+                }
+            }
+        }
+        if let Some(lc) = obj.downcast_ref::<LinkDerivedClass>() {
+            if let Some(id) = lc.id() {
+                if id == args[2] {
+                    check_idx = Some(idx);
+                }
+            }
+            if let Some(ref tag) = lc.link_class_tag {
+                if *tag == args[3] {
+                    expect_idx = Some(idx);
+                }
+            }
+        }
+    }
+
+    let check_idx = check_idx.unwrap_or_else(|| {
+        eprintln!("Unable to find node {}", args[2]);
+        std::process::exit(1);
+    });
+
+    let _expect_idx = expect_idx.unwrap_or_else(|| {
+        eprintln!("Unable to find tag {}", args[3]);
+        std::process::exit(1);
+    });
+
+    let check = &objset.objects()[check_idx];
+
+    let check_link_prop = |name: &str, r: &Option<Ref>| {
+        let r = r.as_ref().unwrap_or_else(|| {
+            eprintln!("Reference is nil for {}", name);
+            std::process::exit(1);
+        });
+
+        match r {
+            Ref::Object(_) => {},
+            Ref::IRI(iri) => {
+                eprintln!("Reference in {} does not refer to an object, has IRI {}", name, iri);
+                std::process::exit(1);
+            }
+        }
+    };
+
+    // Check properties based on the type
+    if let Some(lc) = check.downcast_ref::<LinkClass>() {
+        check_link_prop("link_class_link_prop", &lc.link_class_link_prop);
+        check_link_prop("link_class_link_prop_no_class", &lc.link_class_link_prop_no_class);
+        for (i, r) in lc.link_class_link_list_prop.iter().enumerate() {
+            check_link_prop(&format!("link_class_link_list_prop[{}]", i), &Some(r.clone()));
+        }
+    } else if let Some(lc) = check.downcast_ref::<LinkDerivedClass>() {
+        check_link_prop("link_class_link_prop", &lc.link_class_link_prop);
+        check_link_prop("link_class_link_prop_no_class", &lc.link_class_link_prop_no_class);
+        for (i, r) in lc.link_class_link_list_prop.iter().enumerate() {
+            check_link_prop(&format!("link_class_link_list_prop[{}]", i), &Some(r.clone()));
+        }
+    } else {
+        eprintln!("Check object is not a LinkClass");
+        std::process::exit(1);
+    }
+}
+"""
     prog = _build_rust_prog(
         test_lib,
         tmp_path,
         "link",
-        textwrap.dedent("""\
-            use shacl_model::*;
-            use std::fs::File;
-            use std::io::BufReader;
-
-            fn main() {
-                let args: Vec<String> = std::env::args().collect();
-
-                let file = File::open(&args[1]).expect("Failed to open file");
-                let reader = BufReader::new(file);
-
-                let mut objset = SHACLObjectSet::new();
-                objset.decode(reader).expect("Failed to decode");
-
-                if !objset.validate(None) {
-                    eprintln!("Validation failed");
-                    std::process::exit(1);
-                }
-
-                // Find the check object by ID (args[2]) and the expected object by tag (args[3])
-                let mut check_idx: Option<usize> = None;
-                let mut expect_idx: Option<usize> = None;
-
-                for (idx, obj) in objset.objects().iter().enumerate() {
-                    if let Some(lc) = obj.downcast_ref::<LinkClass>() {
-                        if let Some(id) = lc.id() {
-                            if id == args[2] {
-                                check_idx = Some(idx);
-                            }
-                        }
-                        if let Some(ref tag) = lc.link_class_tag {
-                            if *tag == args[3] {
-                                expect_idx = Some(idx);
-                            }
-                        }
-                    }
-                    if let Some(lc) = obj.downcast_ref::<LinkDerivedClass>() {
-                        if let Some(id) = lc.id() {
-                            if id == args[2] {
-                                check_idx = Some(idx);
-                            }
-                        }
-                        if let Some(ref tag) = lc.link_class_tag {
-                            if *tag == args[3] {
-                                expect_idx = Some(idx);
-                            }
-                        }
-                    }
-                }
-
-                let check_idx = check_idx.unwrap_or_else(|| {
-                    eprintln!("Unable to find node {}", args[2]);
-                    std::process::exit(1);
-                });
-
-                let _expect_idx = expect_idx.unwrap_or_else(|| {
-                    eprintln!("Unable to find tag {}", args[3]);
-                    std::process::exit(1);
-                });
-
-                let check = &objset.objects()[check_idx];
-
-                let check_link_prop = |name: &str, r: &Option<Ref>| {
-                    let r = r.as_ref().unwrap_or_else(|| {
-                        eprintln!("Reference is nil for {}", name);
-                        std::process::exit(1);
-                    });
-
-                    match r {
-                        Ref::Object(_) => {},
-                        Ref::IRI(iri) => {
-                            eprintln!("Reference in {} does not refer to an object, has IRI {}", name, iri);
-                            std::process::exit(1);
-                        }
-                    }
-                };
-
-                // Check properties based on the type
-                if let Some(lc) = check.downcast_ref::<LinkClass>() {
-                    check_link_prop("link_class_link_prop", &lc.link_class_link_prop);
-                    check_link_prop("link_class_link_prop_no_class", &lc.link_class_link_prop_no_class);
-                    for (i, r) in lc.link_class_link_list_prop.iter().enumerate() {
-                        check_link_prop(&format!("link_class_link_list_prop[{}]", i), &Some(r.clone()));
-                    }
-                } else if let Some(lc) = check.downcast_ref::<LinkDerivedClass>() {
-                    check_link_prop("link_class_link_prop", &lc.link_class_link_prop);
-                    check_link_prop("link_class_link_prop_no_class", &lc.link_class_link_prop_no_class);
-                    for (i, r) in lc.link_class_link_list_prop.iter().enumerate() {
-                        check_link_prop(&format!("link_class_link_list_prop[{}]", i), &Some(r.clone()));
-                    }
-                } else {
-                    eprintln!("Check object is not a LinkClass");
-                    std::process::exit(1);
-                }
-            }
-            """),
+        link_code,
     )
 
     def f(path, name, tag, **kwargs):

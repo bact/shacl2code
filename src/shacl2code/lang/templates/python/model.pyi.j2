@@ -222,8 +222,6 @@ class NodeKind(Enum):
 
 def is_IRI(s: Any) -> bool: ...
 def is_blank_node(s: Any) -> bool: ...
-
-
 @dataclass
 class Ontology:
     iri: str
