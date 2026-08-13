@@ -4,17 +4,23 @@
 # SPDX-License-Identifier: MIT
 
 import hashlib
+import importlib
 import json
-import jsonschema
-import pyshacl
-import pytest
-import rdflib
+import os
 import re
 import subprocess
 import sys
-import importlib
+import textwrap
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from datetime import datetime, timezone, timedelta
+
+import jsonschema
+
+import pyshacl
+
+import pytest
+
+import rdflib
 
 from testfixtures import jsonvalidation, timetests
 
@@ -32,9 +38,11 @@ SPDX3_CONTEXT_URL = "https://spdx.github.io/spdx-3-model/context.json"
 
 TEST_TZ = timezone(timedelta(hours=-2), name="TST")
 
+MODEL_VERSION = "1.0.0.alpha"
+
 
 def shacl2code_generate(args, python_args, outfile):
-    return subprocess.run(
+    p = subprocess.run(
         [
             "shacl2code",
             "generate",
@@ -51,6 +59,10 @@ def shacl2code_generate(args, python_args, outfile):
         encoding="utf-8",
     )
 
+    # Add a py.typed file for type checking
+    (outfile / "py.typed").touch()
+    return p
+
 
 @pytest.fixture(scope="module")
 def model_context_url(model_server):
@@ -60,7 +72,8 @@ def model_context_url(model_server):
 @pytest.fixture(scope="module")
 def python_model(tmp_path_factory, model_context_url):
     tmp_directory = tmp_path_factory.mktemp("pythontestcontext")
-    outfile = tmp_directory / "model.py"
+    module_name = "pymodel"
+    output_dir = tmp_directory / module_name
     shacl2code_generate(
         [
             "--input",
@@ -68,139 +81,261 @@ def python_model(tmp_path_factory, model_context_url):
             "--context",
             model_context_url,
         ],
-        [],
-        outfile,
+        [
+            "--version",
+            MODEL_VERSION,
+        ],
+        output_dir,
     )
-    outfile.chmod(0o755)
-    yield (tmp_directory, outfile)
+    yield tmp_directory, module_name
+
+
+@pytest.fixture
+def python_model_env(python_model):
+    module_path, module_name = python_model
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        env.get("PYTHONPATH", "").split(os.pathsep) + [str(module_path)]
+    )
+    return env, module_name
 
 
 @pytest.fixture(scope="module")
-def model_script(python_model):
-    _, script = python_model
+def model_script(tmp_path_factory, python_model):
+    tmp_directory = tmp_path_factory.mktemp("pythonmodelscript")
+    module_path, module_name = python_model
+
+    script = tmp_directory / "script.py"
+    script.write_text(textwrap.dedent(f"""\
+        #! /usr/bin/env python3
+        import sys
+        sys.path.append("{module_path}")
+
+        import {module_name}
+
+        sys.exit({module_name}.main())
+        """))
+    script.chmod(0o755)
     yield script
 
 
 @pytest.fixture(scope="function")
 def model(python_model):
-    tmp_directory, _ = python_model
+    module_path, module_name = python_model
 
     old_path = sys.path[:]
-    sys.path.append(str(tmp_directory))
+    sys.path.append(str(module_path))
     try:
-        import model
-
-        importlib.reload(model)
-        yield model
+        # Reload all model modules
+        for m in list(sys.modules):
+            if m == module_name or m.startswith(module_name + "."):
+                importlib.reload(sys.modules[m])
+        yield importlib.import_module(module_name)
     finally:
         sys.path = old_path
 
 
-@pytest.mark.parametrize(
-    "args",
+MODEL_TESTS = (
+    "args,python_args",
     [
-        ["--input", TEST_MODEL],
-        ["--input", TEST_MODEL, "--context-url", TEST_CONTEXT, SPDX3_CONTEXT_URL],
+        pytest.param(
+            ["--input", TEST_MODEL],
+            [],
+            id="Model",
+        ),
+        pytest.param(
+            ["--input", TEST_MODEL, "--context-url", TEST_CONTEXT, SPDX3_CONTEXT_URL],
+            [],
+            id="Context URL",
+        ),
+        pytest.param(
+            ["--input", TEST_MODEL],
+            ["--include-main=no"],
+            id="No main",
+        ),
+        pytest.param(["--input", TEST_MODEL], ["--version=1.0.0"], id="Version"),
     ],
 )
+
+
+@pytest.mark.parametrize(*MODEL_TESTS)
 class TestOutput:
     """
     Test syntax and formatting of the output file
     """
 
-    def test_output_syntax(self, tmp_path, args):
+    def test_output_syntax(self, model_script, args, python_args):
         """
         Checks that the output file is valid python syntax by executing it"
         """
-        outfile = tmp_path / "output.py"
-        shacl2code_generate(args, [], outfile)
+        subprocess.run([model_script, "--help"], check=True)
 
-        subprocess.run([sys.executable, outfile, "--help"], check=True)
-
-    def test_trailing_whitespace(self, args):
+    def test_trailing_whitespace(self, tmp_path, args, python_args):
         """
         Tests that the generated file does not have trailing whitespace
         """
-        p = shacl2code_generate(args, [], "-")
+        output_dir = tmp_path / "output"
+        shacl2code_generate(args, python_args, output_dir)
 
-        for num, line in enumerate(p.stdout.splitlines()):
-            assert (
-                re.search(r"\s+$", line) is None
-            ), f"Line {num + 1} has trailing whitespace"
+        for p in output_dir.iterdir():
+            for num, line in enumerate(p.read_text().splitlines()):
+                assert (
+                    re.search(r"\s+$", line) is None
+                ), f"{p}: Line {num + 1} has trailing whitespace"
 
-    def test_tabs(self, args):
+    def test_tabs(self, tmp_path, args, python_args):
         """
         Tests that the output file doesn't contain tabs
         """
-        p = shacl2code_generate(args, [], "-")
+        output_dir = tmp_path / "output"
+        shacl2code_generate(args, python_args, output_dir)
 
-        for num, line in enumerate(p.stdout.splitlines()):
-            assert "\t" not in line, f"Line {num + 1} has tabs"
+        for p in output_dir.iterdir():
+            for num, line in enumerate(p.read_text().splitlines()):
+                assert "\t" not in line, f"{p}: Line {num + 1} has tabs"
 
 
-@pytest.mark.parametrize(
-    "args",
-    [
-        ["--input", TEST_MODEL],
-        ["--input", TEST_MODEL, "--context-url", TEST_CONTEXT, SPDX3_CONTEXT_URL],
-    ],
-)
+@pytest.mark.parametrize(*MODEL_TESTS)
 class TestCheckType:
     """
     Static type checking tests for the generated Python code
     """
 
-    def test_mypy(self, tmp_path, args):
+    def test_mypy(self, tmp_path, args, python_args):
         """
         Mypy static type checking
         """
-        outfile = tmp_path / "output.py"
-        shacl2code_generate(args, [], outfile)
+        output_dir = tmp_path / "pymodel"
+        shacl2code_generate(args, python_args, output_dir)
         subprocess.run(
-            ["mypy", outfile],
+            ["mypy", output_dir],
+            encoding="utf-8",
+            check=True,
+        )
+        # Run again on just the .py files
+        subprocess.run(
+            ["mypy"] + [f for f in output_dir.iterdir() if f.suffix == ".py"],
             encoding="utf-8",
             check=True,
         )
 
-    @pytest.mark.xfail(reason="pyrefly is ignoring type annotations from rdflib")
-    def test_pyrefly(self, tmp_path, args):
+    def test_pyrefly(self, tmp_path, args, python_args):
         """
         Pyrefly static type checking
         """
-        outfile = tmp_path / "output.py"
-        shacl2code_generate(args, [], outfile)
+        output_dir = tmp_path / "pymodel"
+        shacl2code_generate(args, python_args, output_dir)
         subprocess.run(
-            ["pyrefly", "check", outfile],
+            ["pyrefly", "check", "--search-path", tmp_path]
+            + list(output_dir.iterdir()),
             encoding="utf-8",
             check=True,
         )
 
-    def test_pyright(self, tmp_path, args):
+    def test_pyright(self, tmp_path, args, python_args):
         """
         Pyright static type checking
         """
-        outfile = tmp_path / "output.py"
-        shacl2code_generate(args, [], outfile)
+        output_dir = tmp_path / "pymodel"
+        shacl2code_generate(args, python_args, output_dir)
         subprocess.run(
-            ["pyright", outfile],
+            ["pyright"] + list(output_dir.iterdir()),
             encoding="utf-8",
             check=True,
         )
 
-    def test_flake8(self, tmp_path, args):
+    def test_flake8(self, tmp_path, args, python_args):
         """
         Flake8 linting
         """
-        outfile = tmp_path / "output.py"
-        shacl2code_generate(args, [], outfile)
+        output_dir = tmp_path / "pymodel"
+        shacl2code_generate(args, python_args, output_dir)
         subprocess.run(
-            [
-                "flake8",
-                "--config",
-                TOP_DIR / ".flake8",
-                outfile,
-            ],
+            ["flake8", "--config", TOP_DIR / ".flake8"] + list(output_dir.iterdir()),
             encoding="utf-8",
+            check=True,
+        )
+
+    def test_bandit(self, tmp_path, args, python_args):
+        """
+        Bandit security linting
+        """
+        output_dir = tmp_path / "pymodel"
+        shacl2code_generate(args, python_args, output_dir)
+        subprocess.run(
+            ["bandit", "-r", output_dir],
+            encoding="utf-8",
+            check=True,
+        )
+
+
+@pytest.fixture
+def python_usage_script(python_model_env, tmp_path):
+    env, module_name = python_model_env
+
+    script_path = tmp_path / "script.py"
+    script_path.write_text(textwrap.dedent(f"""
+            #! /usr/bin/env python3
+            from typing import ClassVar, Iterable, List, Union
+            import {module_name}
+
+            print({module_name}.enumType.foo)
+
+            class OERecipeExtension({module_name}.extensible_abstract_class):
+                TYPE: ClassVar[str] = "http://example.org/shacl2code-test/recipe-extension"
+                NODE_KIND: ClassVar[{module_name}.NodeKind] = {module_name}.NodeKind.BlankNodeOrIRI
+                PROPERTIES: ClassVar[List[{module_name}.ClassProp]] = [
+                    {module_name}.ClassProp(
+                        "is_native",
+                        lambda: {module_name}.BooleanProp(),
+                        iri="http://example.org/shacl2code-test/is-native",
+                        max_count=1,
+                    ),
+                ]
+
+            def test1(o: {module_name}.link_class) -> int:
+                return len(o.link_class_link_list_prop)
+
+            def test2(o: {module_name}.link_class) -> Iterable[Union[{module_name}.link_class, str]]:
+                yield from o.link_class_link_list_prop
+
+            def test3(a: {module_name}.link_class, b: {module_name}.link_class) -> bool:
+                return a in b.link_class_link_list_prop
+
+            def test4(lst: Iterable[{module_name}.SHACLObject]) -> List[{module_name}.SHACLObject]:
+                return sorted(lst)
+            """))
+
+    # Validate the script runs
+    subprocess.run([sys.executable, script_path], env=env, check=True)
+    yield env, script_path
+
+
+class TestUsageType:
+    def test_mypy(self, python_usage_script):
+        env, script_path = python_usage_script
+        subprocess.run(
+            ["mypy", script_path],
+            encoding="utf-8",
+            env=env,
+            check=True,
+        )
+
+    def test_pyright(self, python_usage_script):
+        env, script_path = python_usage_script
+        subprocess.run(
+            ["pyright", script_path],
+            encoding="utf-8",
+            env=env,
+            check=True,
+        )
+
+    def test_pyrefly(self, python_usage_script):
+        env, script_path = python_usage_script
+        subprocess.run(
+            ["pyrefly", "check", script_path],
+            encoding="utf-8",
+            env=env,
             check=True,
         )
 
@@ -251,6 +386,25 @@ def test_script_roundtrip(model_script, tmp_path, roundtrip):
     subprocess.run(
         [model_script, roundtrip, "--outfile", outpath],
         check=True,
+    )
+
+    with roundtrip.open("r") as f:
+        expect_data = json.load(f)
+
+    with outpath.open("r") as f:
+        data = json.load(f)
+
+    assert data == expect_data
+
+
+def test_module_roundtrip(python_model_env, tmp_path, roundtrip):
+    env, module_name = python_model_env
+
+    outpath = tmp_path / "out.json"
+    subprocess.run(
+        [sys.executable, "-m", module_name, roundtrip, "--outfile", outpath],
+        check=True,
+        env=env,
     )
 
     with roundtrip.open("r") as f:
@@ -537,6 +691,11 @@ def test_node_kind_iri(model, test_context_url, cls):
     ["id_prop_class", "inherited_id_prop_class"],
 )
 def test_id_name(model, test_context_url, cls):
+    """
+    Test that alternate ID property names work correctly,
+    including serialization and initialization.
+    """
+
     s = model.JSONLDSerializer()
     c = getattr(model, cls)()
 
@@ -554,7 +713,7 @@ def test_id_name(model, test_context_url, cls):
     assert c.testid is None
     assert c._id is None
 
-    # Serialization should the alias name
+    # Serialization should use the alias name
     c._id = TEST_ID
     result = s.serialize_data(model.SHACLObjectSet([c]))
     assert result == {
@@ -562,6 +721,69 @@ def test_id_name(model, test_context_url, cls):
         "@type": cls.replace("_", "-"),
         "testid": TEST_ID,
     }
+
+    # Test initialization using ID alias
+    c2 = getattr(model, cls)(testid=TEST_ID)
+    assert c2.get_id() == TEST_ID
+    assert c2.testid == TEST_ID
+
+
+def test_get_id_none(model):
+    """get_id returns None when no ID is set."""
+    c = model.test_class()
+    assert c.get_id() is None
+
+
+def test_get_id_set(model):
+    """get_id returns the assigned IRI."""
+    c = model.test_class()
+    c._id = "http://example.com/obj"
+    assert c.get_id() == "http://example.com/obj"
+
+
+def test_set_id(model):
+    """set_id assigns the IRI."""
+    c = model.test_class()
+    c.set_id("http://example.com/obj")
+    assert c._id == "http://example.com/obj"
+    assert c.get_id() == "http://example.com/obj"
+
+
+def test_set_id_none(model):
+    """set_id(None) clears the ID."""
+    c = model.test_class()
+    c.set_id("http://example.com/obj")
+    c.set_id(None)
+    assert c.get_id() is None
+    assert c._id is None
+
+
+def test_set_id_roundtrip(model, test_context_url):
+    """Object serialized with set_id value encodes correct @id."""
+    s = model.JSONLDSerializer()
+    c = model.test_class()
+    c.set_id("http://example.com/set-id-obj")
+    result = s.serialize_data(model.SHACLObjectSet([c]))
+    assert result["@id"] == "http://example.com/set-id-obj"
+
+
+@pytest.mark.parametrize("cls", ["id_prop_class", "inherited_id_prop_class"])
+def test_get_id_with_alias(model, cls):
+    """get_id returns ID set via alias property."""
+    # id-prop-class is a class with an ID alias "testid"
+    c = getattr(model, cls)()
+    c.testid = "http://example.com/alias-obj"
+    assert c.get_id() == "http://example.com/alias-obj"
+
+
+@pytest.mark.parametrize("cls", ["id_prop_class", "inherited_id_prop_class"])
+def test_set_id_with_alias(model, cls):
+    """set_id makes ID accessible through alias property."""
+    # id-prop-class is a class with an ID alias "testid"
+    c = getattr(model, cls)()
+    c.set_id("http://example.com/alias-obj")
+    assert c.testid == "http://example.com/alias-obj"
+    assert c.get_id() == "http://example.com/alias-obj"
 
 
 SAME_AS_VALUE = object()
@@ -754,8 +976,8 @@ def type_tests(name, *typ):
         # Enumerated value
         (
             "test_class_enum_prop",
-            "http://example.org/enumType/foo",
-            "http://example.org/enumType/foo",
+            "http://example.org/shacl2code-test/enumType/foo",
+            "http://example.org/shacl2code-test/enumType/foo",
         ),
         ("test_class_enum_prop", "foo", ValueError),
         *type_tests("test_class_enum_prop", str),
@@ -971,20 +1193,20 @@ def list_type_tests(name, *typ):
         (
             "test_class_enum_list_prop",
             [
-                "http://example.org/enumType/foo",
-                "http://example.org/enumType/bar",
-                "http://example.org/enumType/nolabel",
+                "http://example.org/shacl2code-test/enumType/foo",
+                "http://example.org/shacl2code-test/enumType/bar",
+                "http://example.org/shacl2code-test/enumType/nolabel",
             ],
             [
-                "http://example.org/enumType/foo",
-                "http://example.org/enumType/bar",
-                "http://example.org/enumType/nolabel",
+                "http://example.org/shacl2code-test/enumType/foo",
+                "http://example.org/shacl2code-test/enumType/bar",
+                "http://example.org/shacl2code-test/enumType/nolabel",
             ],
         ),
         (
             "test_class_enum_list_prop",
             [
-                "http://example.org/enumType/foo",
+                "http://example.org/shacl2code-test/enumType/foo",
                 "foo",
             ],
             ValueError,
@@ -1140,8 +1362,8 @@ def test_datetime_to_string(model, value, expect):
             "foo",
         ),
         (
-            "http://example.org/extensible-test-prop",
-            "http://example.org/extensible-test-prop",
+            "http://example.org/shacl2code-test/extensible-test-prop",
+            "http://example.org/shacl2code-test/extensible-test-prop",
             "foo",
             AttributeError,
         ),
@@ -1182,42 +1404,42 @@ def test_extensible_prop(model, test_context_url, prop, serkey, value, expect):
             None,
         ),
         (
-            "http://example.org/extensible-test-prop",
+            "http://example.org/shacl2code-test/extensible-test-prop",
             "foo",
             SAME_AS_VALUE,
             ["foo"],
             ["foo"],
         ),
         (
-            "http://example.org/extensible-test-prop",
+            "http://example.org/shacl2code-test/extensible-test-prop",
             1,
             SAME_AS_VALUE,
             [1],
             [1],
         ),
         (
-            "http://example.org/extensible-test-prop",
+            "http://example.org/shacl2code-test/extensible-test-prop",
             1.123,
             SAME_AS_VALUE,
             ["1.123"],
             [1.123],
         ),
         (
-            "http://example.org/extensible-test-prop",
+            "http://example.org/shacl2code-test/extensible-test-prop",
             object(),
             SAME_AS_VALUE,
             TypeError,
             None,
         ),
         (
-            "http://example.org/extensible-test-prop",
+            "http://example.org/shacl2code-test/extensible-test-prop",
             [1, "foo", 1.123],
             SAME_AS_VALUE,
             [1, "foo", "1.123"],
             [1, "foo", 1.123],
         ),
         (
-            "http://example.org/extensible-test-prop",
+            "http://example.org/shacl2code-test/extensible-test-prop",
             [object()],
             SAME_AS_VALUE,
             TypeError,
@@ -1291,14 +1513,14 @@ def test_extensible_deserialize(model, test_context_url):
 
     class ClosedExtension(model.extensible_class):
         CLOSED = True
-        TYPE = "http://example.org/closed-class"
+        TYPE = "http://example.org/shacl2code-test/closed-class"
 
     class OpenExtension(model.extensible_class):
-        TYPE = "http://example.org/open-class"
+        TYPE = "http://example.org/shacl2code-test/open-class"
 
-    TEST_TYPE = "http://example.org/test-extensible"
-    TEST_IRI = "http://example.org/test-key"
-    TEST_ID = "http://example.org/test-id"
+    TEST_TYPE = "http://example.org/shacl2code-test/test-extensible"
+    TEST_IRI = "http://example.org/shacl2code-test/test-key"
+    TEST_ID = "http://example.org/shacl2code-test/test-id"
 
     objset = deserialize_extension(
         {
@@ -1336,14 +1558,14 @@ def test_extensible_deserialize(model, test_context_url):
 
     objset = deserialize_extension(
         {
-            "@type": "http://example.org/closed-class",
+            "@type": "http://example.org/shacl2code-test/closed-class",
             "@id": TEST_ID,
         }
     )
     obj = objset.find_by_id(TEST_ID)
     assert obj is not None
     assert isinstance(obj, ClosedExtension)
-    assert obj.get_type() == "http://example.org/closed-class"
+    assert obj.get_type() == "http://example.org/shacl2code-test/closed-class"
     assert obj.get_compact_type() is None
 
     # Derived object is closed and cannot have arbitrary IRI assignment
@@ -1352,14 +1574,14 @@ def test_extensible_deserialize(model, test_context_url):
 
     objset = deserialize_extension(
         {
-            "@type": "http://example.org/open-class",
+            "@type": "http://example.org/shacl2code-test/open-class",
             "@id": TEST_ID,
         }
     )
     obj = objset.find_by_id(TEST_ID)
     assert obj is not None
     assert isinstance(obj, OpenExtension)
-    assert obj.get_type() == "http://example.org/open-class"
+    assert obj.get_type() == "http://example.org/shacl2code-test/open-class"
     assert obj.get_compact_type() is None
 
     # Derived object is open and can have arbitrary assignments
@@ -1368,14 +1590,14 @@ def test_extensible_deserialize(model, test_context_url):
 
 def test_enum_named_individuals(model):
     assert type(model.enumType.foo) is str
-    assert model.enumType.foo == "http://example.org/enumType/foo"
+    assert model.enumType.foo == "http://example.org/shacl2code-test/enumType/foo"
 
     c = model.test_class()
 
     assert model.enumType.NAMED_INDIVIDUALS == {
-        "foo": "http://example.org/enumType/foo",
-        "bar": "http://example.org/enumType/bar",
-        "nolabel": "http://example.org/enumType/nolabel",
+        "foo": "http://example.org/shacl2code-test/enumType/foo",
+        "bar": "http://example.org/shacl2code-test/enumType/bar",
+        "nolabel": "http://example.org/shacl2code-test/enumType/nolabel",
     }
 
     for name, value in model.enumType.NAMED_INDIVIDUALS.items():
@@ -1441,7 +1663,10 @@ def test_iri(model, roundtrip):
     assert isinstance(c, model.test_class)
 
     assert c._IRI["_id"] == "@id"
-    assert c._IRI["named_property"] == "http://example.org/test-class/named-property"
+    assert (
+        c._IRI["named_property"]
+        == "http://example.org/shacl2code-test/test-class/named-property"
+    )
 
     for name, iri in c._IRI.items():
         assert c[iri] == getattr(c, name)
@@ -1464,7 +1689,7 @@ def test_shacl(roundtrip):
         (
             URIRef("http://serialize.example.com/non-shape"),
             RDF.type,
-            URIRef("http://example.org/non-shape-class"),
+            URIRef("http://example.org/shacl2code-test/non-shape-class"),
         )
     )
 
@@ -1502,10 +1727,10 @@ def test_single_register(model):
 def test_objset_foreach_type(model, roundtrip):
     objset = model.SHACLObjectSet()
 
-    EXTENSION_ID = "http://example.org/custom-extension"
+    EXTENSION_ID = "http://example.org/shacl2code-test/custom-extension"
 
     class Extension(model.extensible_class):
-        TYPE = "http://example.org/custom-extension-class"
+        TYPE = "http://example.org/shacl2code-test/custom-extension-class"
 
     with roundtrip.open("r") as f:
         model.JSONLDDeserializer().read(f, objset)
@@ -1532,7 +1757,11 @@ def test_objset_foreach_type(model, roundtrip):
     assert set(objset.foreach_type(model.test_class, match_subclass=False)) == expect
     assert set(objset.foreach_type("test-class", match_subclass=False)) == expect
     assert (
-        set(objset.foreach_type("http://example.org/test-class", match_subclass=False))
+        set(
+            objset.foreach_type(
+                "http://example.org/shacl2code-test/test-class", match_subclass=False
+            )
+        )
         == expect
     )
 
@@ -1543,7 +1772,11 @@ def test_objset_foreach_type(model, roundtrip):
     assert set(objset.foreach_type(model.test_class, match_subclass=True)) == expect
     assert set(objset.foreach_type("test-class", match_subclass=True)) == expect
     assert (
-        set(objset.foreach_type("http://example.org/test-class", match_subclass=True))
+        set(
+            objset.foreach_type(
+                "http://example.org/shacl2code-test/test-class", match_subclass=True
+            )
+        )
         == expect
     )
 
@@ -1555,7 +1788,8 @@ def test_objset_foreach_type(model, roundtrip):
     assert (
         set(
             objset.foreach_type(
-                "http://example.org/extensible-class", match_subclass=False
+                "http://example.org/shacl2code-test/extensible-class",
+                match_subclass=False,
             )
         )
         == expect
@@ -1571,7 +1805,8 @@ def test_objset_foreach_type(model, roundtrip):
     assert (
         set(
             objset.foreach_type(
-                "http://example.org/extensible-class", match_subclass=True
+                "http://example.org/shacl2code-test/extensible-class",
+                match_subclass=True,
             )
         )
         == expect
@@ -1581,7 +1816,8 @@ def test_objset_foreach_type(model, roundtrip):
     assert (
         set(
             objset.foreach_type(
-                "http://example.org/custom-extension-class", match_subclass=False
+                "http://example.org/shacl2code-test/custom-extension-class",
+                match_subclass=False,
             )
         )
         == expect
@@ -1596,6 +1832,44 @@ def test_objset_foreach_type(model, roundtrip):
     expect.add(objset.find_by_id("http://serialize.example.com/concrete-class"))
     assert expect != {None}
     assert set(objset.foreach_type(model.abstract_class, match_subclass=True)) == expect
+
+
+def test_objset_remove(model):
+    """
+    Tests that removing an object from the object set works correctly
+    """
+    obj1 = model.test_class(_id="https://example.org/obj1")
+    obj2 = model.test_class(_id="https://example.org/obj2")
+
+    objset = model.SHACLObjectSet([obj1, obj2])
+    assert obj1 in objset
+    assert obj2 in objset
+
+    objset.remove(obj1)
+
+    assert obj1 not in objset
+    assert obj2 in objset
+
+
+def test_objset_remove_not_existing(model):
+    """
+    Tests that removing an object that is not in the object set does not
+    raise an error. It should just do nothing silently.
+    """
+    obj = model.test_class(_id="https://example.org/obj")
+    objset = model.SHACLObjectSet()
+
+    objset.remove(obj)
+
+
+def test_objset_remove_invalid_type(model):
+    """
+    Tests that removing an object that is not a SHACLObject raises a TypeError
+    """
+    objset = model.SHACLObjectSet()
+
+    with pytest.raises(TypeError):
+        objset.remove("not-a-shacl-object")
 
 
 @pytest.mark.parametrize(
@@ -1646,7 +1920,7 @@ def test_required_abstract_class_property(model, tmp_path):
 
 def test_extensible_abstract_class(model):
     class Extension(model.extensible_abstract_class):
-        TYPE = "http://example.org/custom-extension-class"
+        TYPE = "http://example.org/shacl2code-test/custom-extension-class"
 
     # Test that an extensible abstract class cannot be created
     with pytest.raises(NotImplementedError):
@@ -1688,9 +1962,9 @@ def test_deprecated_class(model):
         model.test_deprecated_class()
 
 
-@pytest.mark.filterwarnings("ignore::DeprecationWarning")
 def test_deprecated_property(model):
-    c = model.test_deprecated_class()
+    with pytest.warns(DeprecationWarning):
+        c = model.test_deprecated_class()
 
     with pytest.deprecated_call():
         c.test_deprecated_class_deprecated_string_prop = "foo"
@@ -1706,32 +1980,82 @@ def test_objset_context(model, context, expanded, compacted):
 
 
 def test_slots(model):
-    assert model._USE_SLOTS
+    assert model.model._USE_SLOTS
 
 
 def test_slots_yes(tmp_path):
-    outfile = tmp_path / "output.py"
-    shacl2code_generate(["--input", TEST_MODEL], ["--use-slots", "yes"], outfile)
-    text = outfile.read_text()
+    output_dir = tmp_path / "output"
+    shacl2code_generate(["--input", TEST_MODEL], ["--use-slots", "yes"], output_dir)
+    text = (output_dir / "model.py").read_text()
     assert "_USE_SLOTS = True" in text
 
 
 def test_slots_no(tmp_path):
-    outfile = tmp_path / "output.py"
-    shacl2code_generate(["--input", TEST_MODEL], ["--use-slots", "no"], outfile)
-    text = outfile.read_text()
+    output_dir = tmp_path / "output"
+    shacl2code_generate(["--input", TEST_MODEL], ["--use-slots", "no"], output_dir)
+    text = (output_dir / "model.py").read_text()
     assert "_USE_SLOTS = False" in text
+
+
+RESERVED_WORDS_MODEL = DATA_DIR / "reserved-words.ttl"
+
+
+def test_varname_reserved_words(tmp_path):
+    """
+    varname() must append '_' to property names that collide with
+    SHACLOBJECT_RESERVED_WORDS or Python keywords so that the generated
+    ClassProp pyname, the __init__ kwargs, and _OBJ_PY_PROPS keys all agree.
+    """
+    output_dir = tmp_path / "temp_rwmodel"
+    shacl2code_generate(["--input", RESERVED_WORDS_MODEL], [], output_dir)
+
+    # Generated source must contain the renamed names, not the originals
+    text = (output_dir / "model.py").read_text()
+    for renamed in ("get_id_", "set_id_", "encode_", "class_"):
+        assert (
+            renamed in text
+        ), f"expected renamed property '{renamed}' in generated code"
+    for original in ('"get_id"', '"set_id"', '"encode"', '"class"'):
+        assert (
+            f"ClassProp({original}," not in text
+        ), f"unrenamed property {original} found as ClassProp pyname"
+
+    # Import the generated module and exercise the renamed properties
+    old_path = sys.path[:]
+    sys.path.append(str(tmp_path))
+    try:
+        import temp_rwmodel as m  # noqa: PLC0415
+
+        cls = m.SHACLObject.CLASSES["http://example.org/shacl2code-test/test-rw-class"]
+
+        # Renamed kwargs must work at construction time
+        obj = cls(get_id_="a", set_id_="b", encode_="c", class_="d")
+        assert obj.get_id_ == "a"
+        assert obj.set_id_ == "b"
+        assert obj.encode_ == "c"
+        assert obj.class_ == "d"
+
+        # SHACLObject.get_id() must still return the object IRI,
+        # not the value of the prop (get_id_)
+        assert obj.get_id() is None
+        obj.set_id("http://example.org/shacl2code-test/obj")
+        assert obj.get_id() == "http://example.org/shacl2code-test/obj"
+    finally:
+        sys.path = old_path
+        for mod in list(sys.modules):
+            if mod == "rwmodel" or mod.startswith("rwmodel."):
+                del sys.modules[mod]
 
 
 def test_extensible_properties(model, model_context_url):
 
     class Extension(model.extensible_class):
-        TYPE = "http://example.org/extension"
+        TYPE = "http://example.org/shacl2code-test/extension"
         PROPERTIES = [
             model.ClassProp(
                 "string_prop",
                 lambda: model.StringProp(),
-                "http://example.org/string-prop",
+                "http://example.org/shacl2code-test/string-prop",
                 min_count=1,
             ),
         ]
@@ -1740,7 +2064,7 @@ def test_extensible_properties(model, model_context_url):
         "@context": [
             model_context_url,
             {
-                "prefix": "http://example.org/",
+                "prefix": "http://example.org/shacl2code-test/",
             },
         ],
         "@graph": [
@@ -1758,13 +2082,13 @@ def test_extensible_properties(model, model_context_url):
     d = model.JSONLDDeserializer()
     d.deserialize_data(DATA, objset)
 
-    e = objset.find_by_id("http://example.org/e")
+    e = objset.find_by_id("http://example.org/shacl2code-test/e")
     assert e
     assert isinstance(e, Extension)
     assert e.string_prop == "foo"
-    assert e["http://example.org/string-prop"] == "foo"
-    assert e._id == "http://example.org/e"
-    assert e["http://example.org/extra-data"] == ["bar"]
+    assert e["http://example.org/shacl2code-test/string-prop"] == "foo"
+    assert e._id == "http://example.org/shacl2code-test/e"
+    assert e["http://example.org/shacl2code-test/extra-data"] == ["bar"]
 
     # Ensure the context is preserved
     s = model.JSONLDSerializer()
@@ -1847,33 +2171,33 @@ def test_object_iter(model):
 
     assert data == {
         "@id": "http://example.com/link-class",
-        "http://example.org/encode": None,
-        "http://example.org/import": None,
-        "http://example.org/test-class/anyuri-prop": None,
-        "http://example.org/test-class/boolean-prop": True,
-        "http://example.org/test-class/class-list-prop": [],
-        "http://example.org/test-class/class-prop": None,
-        "http://example.org/test-class/class-prop-no-class": None,
-        "http://example.org/test-class/datetime-list-prop": [],
-        "http://example.org/test-class/datetime-scalar-prop": None,
-        "http://example.org/test-class/datetimestamp-scalar-prop": None,
-        "http://example.org/test-class/enum-list-prop": [],
-        "http://example.org/test-class/enum-prop": None,
-        "http://example.org/test-class/enum-prop-no-class": None,
-        "http://example.org/test-class/float-prop": None,
-        "http://example.org/test-class/integer-prop": None,
-        "http://example.org/test-class/named-property": None,
-        "http://example.org/test-class/non-shape": None,
-        "http://example.org/test-class/nonnegative-integer-prop": None,
-        "http://example.org/test-class/positive-integer-prop": None,
-        "http://example.org/test-class/regex": None,
-        "http://example.org/test-class/regex-datetime": None,
-        "http://example.org/test-class/regex-datetimestamp": None,
-        "http://example.org/test-class/regex-list": [],
-        "http://example.org/test-class/split-string-prop": None,
-        "http://example.org/test-class/string-list-no-datatype": [],
-        "http://example.org/test-class/string-list-prop": ["a", "b"],
-        "http://example.org/test-class/string-scalar-prop": "foo",
+        "http://example.org/shacl2code-test/encode": None,
+        "http://example.org/shacl2code-test/import": None,
+        "http://example.org/shacl2code-test/test-class/anyuri-prop": None,
+        "http://example.org/shacl2code-test/test-class/boolean-prop": True,
+        "http://example.org/shacl2code-test/test-class/class-list-prop": [],
+        "http://example.org/shacl2code-test/test-class/class-prop": None,
+        "http://example.org/shacl2code-test/test-class/class-prop-no-class": None,
+        "http://example.org/shacl2code-test/test-class/datetime-list-prop": [],
+        "http://example.org/shacl2code-test/test-class/datetime-scalar-prop": None,
+        "http://example.org/shacl2code-test/test-class/datetimestamp-scalar-prop": None,
+        "http://example.org/shacl2code-test/test-class/enum-list-prop": [],
+        "http://example.org/shacl2code-test/test-class/enum-prop": None,
+        "http://example.org/shacl2code-test/test-class/enum-prop-no-class": None,
+        "http://example.org/shacl2code-test/test-class/float-prop": None,
+        "http://example.org/shacl2code-test/test-class/integer-prop": None,
+        "http://example.org/shacl2code-test/test-class/named-property": None,
+        "http://example.org/shacl2code-test/test-class/non-shape": None,
+        "http://example.org/shacl2code-test/test-class/nonnegative-integer-prop": None,
+        "http://example.org/shacl2code-test/test-class/positive-integer-prop": None,
+        "http://example.org/shacl2code-test/test-class/regex": None,
+        "http://example.org/shacl2code-test/test-class/regex-datetime": None,
+        "http://example.org/shacl2code-test/test-class/regex-datetimestamp": None,
+        "http://example.org/shacl2code-test/test-class/regex-list": [],
+        "http://example.org/shacl2code-test/test-class/split-string-prop": None,
+        "http://example.org/shacl2code-test/test-class/string-list-no-datatype": [],
+        "http://example.org/shacl2code-test/test-class/string-list-prop": ["a", "b"],
+        "http://example.org/shacl2code-test/test-class/string-scalar-prop": "foo",
     }
 
 
@@ -1895,3 +2219,596 @@ def test_extensible_context(model, roundtrip):
     ), "Property does not have expected type"
 
     assert p["http://custom-prop.example.com/prop"], "Unable to find property value"
+
+
+def test_object_prop_set_coercion(model):
+    """
+    Tests that ObjectProp.set() inherently respects and retains both
+    raw string IRIs and actual SHACLObject instances securely without
+    coercing the object prematurely into a string representation.
+    """
+    c = model.test_class()
+
+    # Assigning string should remain string
+    c.test_class_class_prop = "http://example.org/shacl2code-test/assigned-iri"
+    assert isinstance(c.test_class_class_prop, str)
+    assert c.test_class_class_prop == "http://example.org/shacl2code-test/assigned-iri"
+
+    # Assigning an object should preserve the object instance without str() coercion
+    embedded_obj = model.test_class(
+        _id="http://example.org/shacl2code-test/embedded-obj"
+    )
+    c.test_class_class_prop = embedded_obj
+    assert isinstance(c.test_class_class_prop, model.test_class)  # check if same class
+    assert c.test_class_class_prop is embedded_obj  # check if same object
+
+
+def test_introspection(model):
+    """
+    Tests that defined properties on a class are discoverable
+    through Python's introspection mechanisms (e.g., dir()).
+
+    dir() is one of the primary sources for the tab-completion feature in
+    Python REPLs and IDEs.
+    """
+    c = model.test_class()
+    props = dir(c)
+
+    # Standard SHACLObject properties
+    assert "ID_ALIAS" in props
+    assert "NODE_KIND" in props
+
+    # Added properties from test model
+    assert "test_class_boolean_prop" in props
+    assert "test_class_class_prop" in props
+    assert "test_class_integer_prop" in props
+    assert "test_class_string_scalar_prop" in props
+    assert "test_class_string_list_prop" in props
+
+
+def test_introspection_extensible(model):
+    """
+    Tests that defined properties on an extensible class are discoverable
+    through Python's introspection mechanisms (e.g., dir()).
+
+    Extensible properties set by IRI are not expected to appear in dir()
+    since they are only known at runtime by IRI, not by Python name.
+    """
+    c = model.extensible_class(extensible_class_required="required")
+    props = dir(c)
+
+    # Standard SHACLObject properties
+    assert "ID_ALIAS" in props
+    assert "NODE_KIND" in props
+
+    # Inherited properties from link_class (extensible_class extends link_class)
+    assert "link_class_link_prop" in props
+    assert "link_class_link_prop_no_class" in props
+    assert "link_class_link_list_prop" in props
+    assert "link_class_tag" in props
+
+    # Properties defined on extensible_class itself
+    assert "extensible_class_property" in props
+    assert "extensible_class_required" in props
+
+    # IRI-keyed extensible properties must NOT appear in dir()
+    c["http://example.org/shacl2code-test/extensible-test-prop"] = "test-value"
+    assert "http://example.org/shacl2code-test/extensible-test-prop" not in dir(c)
+
+
+def test_version(model):
+    """
+    Tests that the version string is correctly mapped.
+    """
+    from shacl2code.util import convert_version_string
+
+    assert model.VERSION_STRING == MODEL_VERSION
+    assert model.VERSION == convert_version_string(MODEL_VERSION)
+
+
+def test_ontology(model):
+    classes = list(model.SHACLObject.CLASSES.values())
+    assert classes
+    for c in classes:
+        assert c.ONTOLOGY is not None
+
+
+def test_prerelease_warning(model):
+    model.SHACL2CODE_TEST.is_prerelease = True
+
+    with pytest.warns(FutureWarning):
+        model.test_class()
+
+
+def test_pre_release_cli_option(tmp_path_factory, model_context_url):
+    tmp_directory = tmp_path_factory.mktemp("prerelease_test")
+    module_name = "pymodel_prerelease"
+    output_dir = tmp_directory / module_name
+    shacl2code_generate(
+        [
+            "--input",
+            str(TEST_MODEL),
+            "--context",
+            model_context_url,
+            "--pre-release",
+        ],
+        [
+            "--version",
+            MODEL_VERSION,
+        ],
+        output_dir,
+    )
+
+    sys.path.append(str(tmp_directory))
+    try:
+        m = importlib.import_module(module_name)
+        assert m.SHACL2CODE_TEST.is_prerelease is True
+    finally:
+        sys.path.remove(str(tmp_directory))
+
+
+def test_no_pre_release_cli_option(tmp_path, model_context_url):
+    ttl_content = """
+@base <http://example.org/shacl2code-test/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix sh-to-code: <https://jpewdev.github.io/shacl2code/schema#> .
+
+<http://example.org/shacl2code-test> a owl:Ontology ;
+    rdfs:comment "A test ontology" ;
+    rdfs:label "shacl2code-test" ;
+    owl:versionInfo "1.0.0" ;
+    sh-to-code:isPreRelease true .
+"""
+    ttl_file = tmp_path / "prerelease.ttl"
+    ttl_file.write_text(ttl_content)
+
+    module_name = "pymodel_default_true"
+    output_dir = tmp_path / module_name
+    shacl2code_generate(
+        [
+            "--input",
+            str(ttl_file),
+            "--context",
+            model_context_url,
+        ],
+        [
+            "--version",
+            MODEL_VERSION,
+        ],
+        output_dir,
+    )
+
+    sys.path.append(str(tmp_path))
+    try:
+        m = importlib.import_module(module_name)
+        assert m.SHACL2CODE_TEST.is_prerelease is True
+    finally:
+        sys.path.remove(str(tmp_path))
+
+    module_name_no = "pymodel_no_prerelease"
+    output_dir_no = tmp_path / module_name_no
+    shacl2code_generate(
+        [
+            "--input",
+            str(ttl_file),
+            "--context",
+            model_context_url,
+            "--no-pre-release",
+        ],
+        [
+            "--version",
+            MODEL_VERSION,
+        ],
+        output_dir_no,
+    )
+
+    sys.path.append(str(tmp_path))
+    try:
+        m = importlib.import_module(module_name_no)
+        assert m.SHACL2CODE_TEST.is_prerelease is False
+    finally:
+        sys.path.remove(str(tmp_path))
+
+
+def test_pre_release_annotations_cases(tmp_path, model_context_url):
+    # The number in the comment indicates the precedence of the annotation.
+    # 1 is the highest precedence (force by command line option)
+    cases = [
+        # 2) sh-to-code:isPreRelease
+        ("sh-to-code:isPreRelease true .", True),
+        ("sh-to-code:isPreRelease false .", False),
+        # 3) adms:status (EU SEMIC vocab)
+        (
+            "adms:status <http://publications.europa.eu/resource/authority/dataset-status/DEVELOP> .",
+            True,
+        ),
+        (
+            "adms:status <http://publications.europa.eu/resource/authority/dataset-status/COMPLETED> .",
+            False,
+        ),
+        # 4) adms:status (Original ADMS vocab)
+        ("adms:status <http://purl.org/adms/status/UnderDevelopment> .", True),
+        ("adms:status <http://purl.org/adms/status/Completed> .", False),
+        # 5) bibo:status (Bibliographic Ontology)
+        ("bibo:status <http://purl.org/ontology/bibo/status/draft> .", True),
+        ("bibo:status <http://purl.org/ontology/bibo/status/published> .", False),
+        ("bibo:status <http://purl.org/ontology/bibo/status/legal> .", False),
+        # 6) schema:creativeWorkStatus
+        ('schema:creativeWorkStatus "Draft" .', True),
+        ('schema:creativeWorkStatus "Incomplete" .', True),
+        ('schema:creativeWorkStatus "Published" .', False),
+        # 7) vs:term_status
+        ('vs:term_status "testing" .', True),
+        ('vs:term_status "unstable" .', True),
+        ('vs:term_status "stable" .', False),
+        # 8) owl:versionInfo (pre-release extension)
+        ('owl:versionInfo "3.1.0-rc2" .', True),
+        ('owl:versionInfo "1.2.1-SNAPSHOT" .', True),
+        ('owl:versionInfo "1.0.0.alpha" .', True),
+        ('owl:versionInfo "1.0.0" .', False),
+        # 9) owl:versionInfo (major version zero)
+        ('owl:versionInfo "0.7.1" .', True),
+        ('owl:versionInfo "0.0.1" .', True),
+        # date-like version must not be mistaken for a semver pre-release
+        # suffix (no dotted numeric core precedes the hyphen)
+        ('owl:versionInfo "2024-01-15" .', False),
+        # Fallback (no annotations or versionInfo at all)
+        ('rdfs:comment "A test ontology" .', False),
+    ]
+
+    for idx, (annotations, expected) in enumerate(cases):
+        ttl_content = f"""
+@base <http://example.org/shacl2code-test/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix sh-to-code: <https://jpewdev.github.io/shacl2code/schema#> .
+@prefix adms: <http://www.w3.org/ns/adms#> .
+@prefix schema: <http://schema.org/> .
+@prefix vs: <http://www.w3.org/2003/06/sw-vocab-status/ns#> .
+@prefix bibo: <http://purl.org/ontology/bibo/> .
+
+<http://example.org/shacl2code-test> a owl:Ontology ;
+    rdfs:comment "A test ontology" ;
+    rdfs:label "shacl2code-test" ;
+    {annotations}
+"""
+        ttl_file = tmp_path / f"case_{idx}.ttl"
+        ttl_file.write_text(ttl_content)
+
+        module_name = f"pymodel_case_{idx}"
+        output_dir = tmp_path / module_name
+        shacl2code_generate(
+            [
+                "--input",
+                str(ttl_file),
+                "--context",
+                model_context_url,
+            ],
+            [
+                "--version",
+                MODEL_VERSION,
+            ],
+            output_dir,
+        )
+
+        sys.path.append(str(tmp_path))
+        try:
+            m = importlib.import_module(module_name)
+            assert (
+                m.SHACL2CODE_TEST.is_prerelease is expected
+            ), f"Failed for case {idx}: {annotations}"
+        finally:
+            sys.path.remove(str(tmp_path))
+
+
+def test_pre_release_precedence(tmp_path, model_context_url):
+    # Example 1:
+    # 2) sh-to-code:isPreRelease false (False)
+    # 3) adms:status EU SEMIC DEVELOP (True)
+    # Expected: False (sh-to-code has higher precedence)
+    ttl_content_1 = """
+@base <http://example.org/shacl2code-test/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix sh-to-code: <https://jpewdev.github.io/shacl2code/schema#> .
+@prefix adms: <http://www.w3.org/ns/adms#> .
+
+<http://example.org/shacl2code-test> a owl:Ontology ;
+    rdfs:label "shacl2code-test" ;
+    sh-to-code:isPreRelease false ;
+    adms:status <http://publications.europa.eu/resource/authority/dataset-status/DEVELOP> .
+"""
+    ttl_file_1 = tmp_path / "prec_1.ttl"
+    ttl_file_1.write_text(ttl_content_1)
+
+    module_name_1 = "pymodel_prec_1"
+    output_dir_1 = tmp_path / module_name_1
+    shacl2code_generate(
+        [
+            "--input",
+            str(ttl_file_1),
+            "--context",
+            model_context_url,
+        ],
+        [
+            "--version",
+            MODEL_VERSION,
+        ],
+        output_dir_1,
+    )
+
+    sys.path.append(str(tmp_path))
+    try:
+        m = importlib.import_module(module_name_1)
+        assert m.SHACL2CODE_TEST.is_prerelease is False
+    finally:
+        sys.path.remove(str(tmp_path))
+
+    # Example 2:
+    # 6) schema:creativeWorkStatus "Published" (False)
+    # 7) vs:term_status "testing" (True)
+    # Expected: False (creativeWorkStatus has higher precedence)
+    ttl_content_2 = """
+@base <http://example.org/shacl2code-test/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix schema: <http://schema.org/> .
+@prefix vs: <http://www.w3.org/2003/06/sw-vocab-status/ns#> .
+
+<http://example.org/shacl2code-test> a owl:Ontology ;
+    rdfs:label "shacl2code-test" ;
+    schema:creativeWorkStatus "Published" ;
+    vs:term_status "testing" .
+"""
+    ttl_file_2 = tmp_path / "prec_2.ttl"
+    ttl_file_2.write_text(ttl_content_2)
+
+    module_name_2 = "pymodel_prec_2"
+    output_dir_2 = tmp_path / module_name_2
+    shacl2code_generate(
+        [
+            "--input",
+            str(ttl_file_2),
+            "--context",
+            model_context_url,
+        ],
+        [
+            "--version",
+            MODEL_VERSION,
+        ],
+        output_dir_2,
+    )
+
+    sys.path.append(str(tmp_path))
+    try:
+        m = importlib.import_module(module_name_2)
+        assert m.SHACL2CODE_TEST.is_prerelease is False
+    finally:
+        sys.path.remove(str(tmp_path))
+
+    # Example 3:
+    # 3) adms:status EU SEMIC DEVELOP (True)
+    # 6) schema:creativeWorkStatus "Published" (False)
+    # Expected: True (adms:status has higher precedence)
+    ttl_content_3 = """
+@base <http://example.org/shacl2code-test/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix adms: <http://www.w3.org/ns/adms#> .
+@prefix schema: <http://schema.org/> .
+
+<http://example.org/shacl2code-test> a owl:Ontology ;
+    rdfs:label "shacl2code-test" ;
+    adms:status <http://publications.europa.eu/resource/authority/dataset-status/DEVELOP> ;
+    schema:creativeWorkStatus "Published" .
+"""
+    ttl_file_3 = tmp_path / "prec_3.ttl"
+    ttl_file_3.write_text(ttl_content_3)
+
+    module_name_3 = "pymodel_prec_3"
+    output_dir_3 = tmp_path / module_name_3
+    shacl2code_generate(
+        [
+            "--input",
+            str(ttl_file_3),
+            "--context",
+            model_context_url,
+        ],
+        [
+            "--version",
+            MODEL_VERSION,
+        ],
+        output_dir_3,
+    )
+
+    sys.path.append(str(tmp_path))
+    try:
+        m = importlib.import_module(module_name_3)
+        assert m.SHACL2CODE_TEST.is_prerelease is True
+    finally:
+        sys.path.remove(str(tmp_path))
+
+    # Example 4:
+    # 4) adms:status Original ADMS status Completed (False)
+    # 5) bibo:status draft (True)
+    # Expected: False (adms:status has higher precedence)
+    ttl_content_4 = """
+@base <http://example.org/shacl2code-test/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix adms: <http://www.w3.org/ns/adms#> .
+@prefix bibo: <http://purl.org/ontology/bibo/> .
+
+<http://example.org/shacl2code-test> a owl:Ontology ;
+    rdfs:label "shacl2code-test" ;
+    adms:status <http://purl.org/adms/status/Completed> ;
+    bibo:status <http://purl.org/ontology/bibo/status/draft> .
+"""
+    ttl_file_4 = tmp_path / "prec_4.ttl"
+    ttl_file_4.write_text(ttl_content_4)
+
+    module_name_4 = "pymodel_prec_4"
+    output_dir_4 = tmp_path / module_name_4
+    shacl2code_generate(
+        [
+            "--input",
+            str(ttl_file_4),
+            "--context",
+            model_context_url,
+        ],
+        [
+            "--version",
+            MODEL_VERSION,
+        ],
+        output_dir_4,
+    )
+
+    sys.path.append(str(tmp_path))
+    try:
+        m = importlib.import_module(module_name_4)
+        assert m.SHACL2CODE_TEST.is_prerelease is False
+    finally:
+        sys.path.remove(str(tmp_path))
+
+    # Example 5:
+    # 5) bibo:status published (False)
+    # 6) schema:creativeWorkStatus Draft (True)
+    # Expected: False (bibo:status has higher precedence)
+    ttl_content_5 = """
+@base <http://example.org/shacl2code-test/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix schema: <http://schema.org/> .
+@prefix bibo: <http://purl.org/ontology/bibo/> .
+
+<http://example.org/shacl2code-test> a owl:Ontology ;
+    rdfs:label "shacl2code-test" ;
+    bibo:status <http://purl.org/ontology/bibo/status/published> ;
+    schema:creativeWorkStatus "Draft" .
+"""
+    ttl_file_5 = tmp_path / "prec_5.ttl"
+    ttl_file_5.write_text(ttl_content_5)
+
+    module_name_5 = "pymodel_prec_5"
+    output_dir_5 = tmp_path / module_name_5
+    shacl2code_generate(
+        [
+            "--input",
+            str(ttl_file_5),
+            "--context",
+            model_context_url,
+        ],
+        [
+            "--version",
+            MODEL_VERSION,
+        ],
+        output_dir_5,
+    )
+
+    sys.path.append(str(tmp_path))
+    try:
+        m = importlib.import_module(module_name_5)
+        assert m.SHACL2CODE_TEST.is_prerelease is False
+    finally:
+        sys.path.remove(str(tmp_path))
+
+
+def test_pre_release_multi_valued_annotations(tmp_path, model_context_url):
+    # Each of these predicates can legally repeat.
+    # A stable-looking value listed first must not hide
+    # a pre-release-indicating value listed after it.
+    cases = [
+        # owl:versionInfo: first value stable, second is a semver
+        # pre-release extension.
+        (
+            """
+owl:versionInfo "1.0.0" ;
+owl:versionInfo "2.0.0-beta" .
+""",
+            True,
+        ),
+        # adms:status (EU SEMIC vocab): first value stable, second under
+        # development.
+        (
+            """
+adms:status <http://publications.europa.eu/resource/authority/dataset-status/COMPLETED> ;
+adms:status <http://publications.europa.eu/resource/authority/dataset-status/DEVELOP> .
+""",
+            True,
+        ),
+        # schema:creativeWorkStatus: first value stable, second draft.
+        (
+            """
+schema:creativeWorkStatus "Published" ;
+schema:creativeWorkStatus "Draft" .
+""",
+            True,
+        ),
+        # vs:term_status: first value stable, second testing.
+        (
+            """
+vs:term_status "stable" ;
+vs:term_status "testing" .
+""",
+            True,
+        ),
+        # bibo:status: first value published, second draft.
+        (
+            """
+bibo:status <http://purl.org/ontology/bibo/status/published> ;
+bibo:status <http://purl.org/ontology/bibo/status/draft> .
+""",
+            True,
+        ),
+    ]
+
+    for idx, (annotations, expected) in enumerate(cases):
+        ttl_content = f"""
+@base <http://example.org/shacl2code-test/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix adms: <http://www.w3.org/ns/adms#> .
+@prefix schema: <http://schema.org/> .
+@prefix vs: <http://www.w3.org/2003/06/sw-vocab-status/ns#> .
+@prefix bibo: <http://purl.org/ontology/bibo/> .
+
+<http://example.org/shacl2code-test> a owl:Ontology ;
+    rdfs:label "shacl2code-test" ;
+    {annotations}
+"""
+        ttl_file = tmp_path / f"multi_{idx}.ttl"
+        ttl_file.write_text(ttl_content)
+
+        module_name = f"pymodel_multi_{idx}"
+        output_dir = tmp_path / module_name
+        shacl2code_generate(
+            [
+                "--input",
+                str(ttl_file),
+                "--context",
+                model_context_url,
+            ],
+            [
+                "--version",
+                MODEL_VERSION,
+            ],
+            output_dir,
+        )
+
+        sys.path.append(str(tmp_path))
+        try:
+            m = importlib.import_module(module_name)
+            assert (
+                m.SHACL2CODE_TEST.is_prerelease is expected
+            ), f"Failed for case {idx}: {annotations}"
+        finally:
+            sys.path.remove(str(tmp_path))

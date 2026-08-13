@@ -3,17 +3,20 @@
 # Copyright (c) 2024 Joshua Watt
 #
 # SPDX-License-Identifier: MIT
+"""Command-line interface for shacl2code"""
 
 import argparse
 import json
 import sys
 import urllib.request
-import rdflib
 from pathlib import Path
 
-from . import Model, UrlContext, ContextData
-from .version import VERSION
+import rdflib
+
 from .lang import LANGUAGES
+from .model import Model
+from .urlcontext import ContextData, UrlContext
+from .version import VERSION
 
 
 def main(args=None):
@@ -48,7 +51,7 @@ def main(args=None):
                     data = json.load(f)
             contexts.append(ContextData(data, url))
 
-        m = Model(graph, UrlContext(contexts))
+        m = Model(graph, UrlContext(contexts), is_prerelease=args.pre_release)
 
         render = args.lang(args)
         render.output(m)
@@ -83,7 +86,7 @@ def main(args=None):
     generate_parser.add_argument(
         "--input",
         "-i",
-        help="Input model (path, URL, or '-')",
+        help="Input model (path, URL, or '-'). Specified multiple times for multiple inputs",
         action="append",
         default=[],
         required=True,
@@ -97,16 +100,17 @@ def main(args=None):
     generate_parser.add_argument(
         "--context",
         "-x",
-        help="Require context for output (URL)",
+        help="Require context from CONTEXT_URL. Specified multiple times for multiple contexts",
+        metavar="CONTEXT_URL",
         action="append",
         default=[],
     )
     generate_parser.add_argument(
         "--context-url",
         "-u",
-        help="Require context from LOCATION (path or URL), but report as URL in generated code",
+        help="Require context from CONTEXT_LOCATION (path or URL), but report as CONTEXT_URL in generated code. Specified multiple times for multiple contexts",
         nargs=2,
-        metavar=("LOCATION", "URL"),
+        metavar=("CONTEXT_LOCATION", "CONTEXT_URL"),
         action="append",
         default=[],
     )
@@ -115,6 +119,11 @@ def main(args=None):
         "-l",
         help="SPDX License Identifier to use for generated source code. Default is %(default)s",
         default="0BSD",
+    )
+    generate_parser.add_argument(
+        "--pre-release",
+        action=argparse.BooleanOptionalAction,
+        help="Mark the generated binding as pre-release. Overrides any ontology annotations",
     )
     generate_parser.set_defaults(func=handle_generate)
 

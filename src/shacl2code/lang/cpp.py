@@ -2,14 +2,15 @@
 # Copyright (c) 2024 Joshua Watt
 #
 # SPDX-License-Identifier: MIT
-
-from .common import JinjaTemplateRender
-from .lang import language, TEMPLATE_DIR
-from ..version import VERSION
+"""C++ language binding renderer"""
 
 import re
 import textwrap
 from pathlib import Path
+
+from .common import JinjaTemplateRender
+from .lang import TEMPLATE_DIR, language
+from ..version import VERSION
 
 
 def varname(*name):

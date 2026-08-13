@@ -2,12 +2,23 @@
 # Copyright (c) 2024 Joshua Watt
 #
 # SPDX-License-Identifier: MIT
-
-from .lang import LANGUAGES  # noqa: F401
+"""Language binding renderers for shacl2code"""
 
 # All renderers must be imported here to be registered
-from .cpp import CppRender  # noqa: F401
-from .jinja import JinjaRender  # noqa: F401
-from .jsonschema import JsonSchemaRender  # noqa: F401
-from .python import PythonRender  # noqa: F401
-from .golang import GoLangRender  # noqa: F401
+from .cpp import CppRender
+from .golang import GoLangRender
+from .jinja import JinjaRender
+from .jsonschema import JsonSchemaRender
+from .lang import LANGUAGES
+from .python import PythonRender
+from .rust import RustRender
+
+__all__ = [
+    "LANGUAGES",
+    "CppRender",
+    "GoLangRender",
+    "JinjaRender",
+    "JsonSchemaRender",
+    "PythonRender",
+    "RustRender",
+]

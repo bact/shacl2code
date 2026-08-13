@@ -1,68 +1,151 @@
-#
 # Copyright (c) 2024 Joshua Watt
 #
 # SPDX-License-Identifier: MIT
+"""Python language binding renderer"""
 
-import re
 import keyword
+import re
+from pathlib import Path
 
-from .common import BasicJinjaRender
-from .lang import language, TEMPLATE_DIR
+from .common import JinjaTemplateRender
+from .lang import TEMPLATE_DIR, language
+from ..util import convert_version_string
+
+DATATYPE_CLASSES = {
+    "http://www.w3.org/2001/XMLSchema#string": "StringProp",
+    "http://www.w3.org/2001/XMLSchema#anyURI": "AnyURIProp",
+    "http://www.w3.org/2001/XMLSchema#integer": "IntegerProp",
+    "http://www.w3.org/2001/XMLSchema#positiveInteger": "PositiveIntegerProp",
+    "http://www.w3.org/2001/XMLSchema#nonNegativeInteger": "NonNegativeIntegerProp",
+    "http://www.w3.org/2001/XMLSchema#boolean": "BooleanProp",
+    "http://www.w3.org/2001/XMLSchema#decimal": "FloatProp",
+    "http://www.w3.org/2001/XMLSchema#dateTime": "DateTimeProp",
+    "http://www.w3.org/2001/XMLSchema#dateTimeStamp": "DateTimeStampProp",
+}
+
+DATATYPE_PYTHON_TYPES = {
+    "http://www.w3.org/2001/XMLSchema#string": "str",
+    "http://www.w3.org/2001/XMLSchema#anyURI": "str",
+    "http://www.w3.org/2001/XMLSchema#integer": "int",
+    "http://www.w3.org/2001/XMLSchema#positiveInteger": "int",
+    "http://www.w3.org/2001/XMLSchema#nonNegativeInteger": "int",
+    "http://www.w3.org/2001/XMLSchema#boolean": "bool",
+    "http://www.w3.org/2001/XMLSchema#decimal": "float",
+    "http://www.w3.org/2001/XMLSchema#dateTime": "datetime",
+    "http://www.w3.org/2001/XMLSchema#dateTimeStamp": "datetime",
+}
+
+
+SHACLOBJECT_RESERVED_WORDS = {
+    "AUTO_NAMED_INDIVIDUALS",
+    "CLASSES",
+    "COMPACT_TYPE",
+    "ID_ALIAS",
+    "IS_ABSTRACT",
+    "IS_DEPRECATED",
+    "NAMED_INDIVIDUALS",
+    "NODE_KIND",
+    "PROPERTIES",
+    "TYPE",
+    "decode",
+    "encode",
+    "get_compact_type",
+    "get_id",
+    "get_type",
+    "iter_objects",
+    "link_helper",
+    "property_keys",
+    "set_id",
+    "walk",
+}
 
 
 def varname(*name):
-    """
-    Make a valid Python variable name.
-    """
-
+    """Make a valid Python variable name."""
     name = "_".join(name)
-    # Any invalid characters at the beginning of the name are removed (except
-    # "@")
+    # Any invalid characters at the beginning of the name are removed (except "@")
     name = re.sub(r"^[^a-zA-Z0-9_@]*", "", name)
     # Any other invalid characters are replaced with "_" (including "@")
     name = re.sub(r"[^a-zA-Z0-9_]", "_", name)
     # Consolidate runs of "_" to a single one
     name = re.sub(r"__+", "_", name)
-    # Add a _ to anything that is a python keyword
-    while keyword.iskeyword(name):
+    # Append '_' to avoid collisions with Python or SHACLObject keywords
+    while keyword.iskeyword(name) or name in SHACLOBJECT_RESERVED_WORDS:
         name = name + "_"
     return name
 
 
 @language("python")
-class PythonRender(BasicJinjaRender):
-    """
-    Render Python Language Bindings
-    """
+class PythonRender(JinjaTemplateRender):
+    """Render Python Language Bindings."""
 
     HELP = "Python Language Bindings"
 
+    FILES = (
+        "__init__.py",
+        "model.py",
+        "model.pyi",
+    )
+
     def __init__(self, args):
-        super().__init__(args, TEMPLATE_DIR / "python.py.j2")
+        super().__init__(args)
+        self.__output = args.output
         self.__use_slots = args.use_slots
-        self.__render_args = {
-            "elide_lists": args.elide_lists,
-        }
+        self.__include_main = args.include_main == "yes"
+        self.__version_str = args.version
+        if args.version:
+            self.__version = repr(convert_version_string(args.version))
+        else:
+            self.__version = ""
 
     @classmethod
     def get_arguments(cls, parser):
-        super().get_arguments(parser)
-
         parser.add_argument(
-            "--elide-lists",
-            action="store_true",
-            help="Elide lists when writing documents if they only contain a single item",
+            "--output",
+            "-o",
+            type=Path,
+            help="Output directory",
+            required=True,
+        )
+        parser.add_argument(
+            "--include-main",
+            choices=("yes", "no"),
+            default="yes",
+            help="Generate a main function for the module. Default is '%(default)s'",
         )
         parser.add_argument(
             "--use-slots",
             choices=("auto", "yes", "no"),
             default="auto",
-            help="Use __slot__ to reduce memory usage. Slots prevents multiple inheritance. Default is %(default)s",
+            help=(
+                "Use __slot__ to reduce memory usage. "
+                "Slots prevents multiple inheritance. Default is %(default)s"
+            ),
         )
+        parser.add_argument(
+            "--version",
+            help="Specify model version",
+        )
+
+    def get_outputs(self):
+        t = TEMPLATE_DIR / "python"
+        self.__output.mkdir(parents=True, exist_ok=True)
+
+        def get_file(name):
+            return self.__output / name, t / (name + ".j2"), {}
+
+        for s in self.FILES:
+            yield get_file(s)
+
+        if self.__include_main:
+            yield get_file("cmd.py")
+            yield get_file("__main__.py")
 
     def get_extra_env(self):
         return {
             "varname": varname,
+            "DATATYPE_CLASSES": DATATYPE_CLASSES,
+            "DATATYPE_PYTHON_TYPES": DATATYPE_PYTHON_TYPES,
         }
 
     def get_additional_render_args(self, model):
@@ -74,5 +157,7 @@ class PythonRender(BasicJinjaRender):
             use_slots = False
         return {
             "use_slots": use_slots,
-            **self.__render_args,
+            "include_main": self.__include_main,
+            "version_str": self.__version_str,
+            "version": self.__version,
         }

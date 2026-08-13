@@ -1,4 +1,18 @@
-from .model import Model, ModelException  # noqa: F401
-from .urlcontext import UrlContext, ContextData  # noqa: F401
-from .main import main  # noqa: F401
-from .version import VERSION  # noqa: F401
+# Copyright (c) 2024 Joshua Watt
+#
+# SPDX-License-Identifier: MIT
+"""shacl2code - Generate code from SHACL ontology models"""
+
+from .main import main
+from .model import Model, ModelException
+from .urlcontext import ContextData, UrlContext
+from .version import VERSION
+
+__all__ = [
+    "VERSION",
+    "ContextData",
+    "Model",
+    "ModelException",
+    "UrlContext",
+    "main",
+]

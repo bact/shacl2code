@@ -3,12 +3,24 @@
 # Copyright (c) 2024 Joshua Watt
 #
 # SPDX-License-Identifier: MIT
+"""SHACL model parsing and data class definitions"""
 
-import typing
+import re
 from dataclasses import dataclass, field
+from typing import List, Optional
 
 from rdflib import URIRef
-from rdflib.namespace import RDF, RDFS, OWL, SH, XSD, DefinedNamespace, Namespace
+from rdflib.namespace import (
+    DefinedNamespace,
+    Namespace,
+    OWL,
+    RDF,
+    RDFS,
+    SH,
+    XSD,
+)
+
+from .util import convert_version_string
 
 PATTERN_DATATYPES = [
     str(XSD.string),
@@ -22,6 +34,7 @@ class SHACL2CODE(DefinedNamespace):
     idPropertyName: URIRef
     isExtensible: URIRef
     isAbstract: URIRef
+    isPreRelease: URIRef
 
     _NS = Namespace("https://jpewdev.github.io/shacl2code/schema#")
 
@@ -55,10 +68,21 @@ def remove_common_prefix(val, *cmp):
 
 
 @dataclass
+class Ontology:
+    _id: str
+    name: str
+    comment: str = ""
+    label: str = ""
+    version: str = ""
+    is_prerelease: bool = False
+
+
+@dataclass
 class Individual:
     _id: str
     varname: str
     comment: str = ""
+    ontology: Optional[Ontology] = None
 
 
 @dataclass
@@ -66,9 +90,9 @@ class Property:
     path: str
     varname: str
     comment: str = ""
-    max_count: int = None
-    min_count: int = None
-    enum_values: list = field(default_factory=list)
+    max_count: Optional[int] = None
+    min_count: Optional[int] = None
+    enum_values: List[str] = field(default_factory=list)
     class_id: str = ""
     datatype: str = ""
     pattern: str = ""
@@ -79,26 +103,27 @@ class Property:
 class Class:
     _id: str
     clsname: str
-    parent_ids: typing.List[str]
-    derived_ids: list
-    properties: typing.List[Property]
+    parent_ids: List[str]
+    derived_ids: List[str]
+    properties: List[Property]
     comment: str = ""
     id_property: str = ""
-    node_kind: str = None
+    node_kind: Optional[str] = None
     is_extensible: bool = False
     is_abstract: bool = False
-    named_individuals: list = None
+    named_individuals: Optional[List[Individual]] = None
     deprecated: bool = False
+    ontology: Optional[Ontology] = None
 
 
 class Model(object):
-    def __init__(self, graph, context=None):
+    def __init__(self, graph, context=None, is_prerelease=None):
         self.model = graph
         self.context = context
         self.compact_ids = {}
         self.objects = {}
-        self.enums = []
         self.classes = []
+        self.ontologies = []
         class_iris = set()
         classes_by_iri = {}
 
@@ -111,6 +136,12 @@ class Model(object):
             if v is None:
                 return v
             return str(v)
+
+        def get_ontology(_id):
+            for o in self.ontologies:
+                if str(_id).startswith(o._id):
+                    return o
+            return None
 
         def get_inherited_value(subject, predicate, default=None):
             def get_value(subject, predicate):
@@ -150,6 +181,7 @@ class Model(object):
                         comment=str(
                             self.model.value(member_iri, RDFS.comment, default="")
                         ),
+                        ontology=get_ontology(member_iri),
                     )
                 )
             members.sort(key=lambda i: i._id)
@@ -167,6 +199,121 @@ class Model(object):
                 return True
 
             return False
+
+        def is_semver_prerelease(version_str):
+            # Only treat a hyphen as a semver pre-release marker when it
+            # directly follows a dotted numeric core (e.g. "1.2.3-beta"),
+            # not e.g. a date-like version such as "2024-01-15".
+            if re.match(r"^\d+\.\d+(?:\.\d+)?-[0-9A-Za-z]", version_str):
+                return True
+            if re.search(
+                r"\b(alpha|beta|dev|pre|rc|snapshot|test)\b", version_str, re.IGNORECASE
+            ):
+                return True
+            return False
+
+        def get_is_prerelease(onto_iri):
+            # 1) --pre-release command line option
+            if is_prerelease is not None:
+                return is_prerelease
+
+            # 2) sh-to-code:isPreRelease
+            val = self.model.value(onto_iri, SHACL2CODE.isPreRelease)
+            if val is not None:
+                return bool(val)
+
+            adms_statuses = list(
+                self.model.objects(onto_iri, URIRef("http://www.w3.org/ns/adms#status"))
+            )
+            if adms_statuses:
+                semic = [
+                    str(s)
+                    for s in adms_statuses
+                    if str(s).startswith(
+                        "http://publications.europa.eu/resource/authority/dataset-status/"
+                    )
+                ]
+                # 3) adms:status (EU SEMIC vocab)
+                if semic:
+                    return any(
+                        s
+                        == "http://publications.europa.eu/resource/authority/dataset-status/DEVELOP"
+                        for s in semic
+                    )
+                original = [
+                    str(s)
+                    for s in adms_statuses
+                    if str(s).startswith("http://purl.org/adms/status/")
+                ]
+                # 4) adms:status (Original ADMS vocab)
+                if original:
+                    return any(
+                        s == "http://purl.org/adms/status/UnderDevelopment"
+                        for s in original
+                    )
+
+            # 5) bibo:status (Bibliographic Ontology)
+            bibo_statuses = list(
+                self.model.objects(
+                    onto_iri, URIRef("http://purl.org/ontology/bibo/status")
+                )
+            )
+            if bibo_statuses:
+                return any(
+                    str(s) == "http://purl.org/ontology/bibo/status/draft"
+                    for s in bibo_statuses
+                )
+
+            # 6) schema:creativeWorkStatus
+            schema_statuses = list(
+                self.model.objects(
+                    onto_iri, URIRef("http://schema.org/creativeWorkStatus")
+                )
+            ) or list(
+                self.model.objects(
+                    onto_iri, URIRef("https://schema.org/creativeWorkStatus")
+                )
+            )
+            if schema_statuses:
+                return any(str(s) in ("Draft", "Incomplete") for s in schema_statuses)
+
+            # 7) vs:term_status
+            vs_statuses = list(
+                self.model.objects(
+                    onto_iri,
+                    URIRef("http://www.w3.org/2003/06/sw-vocab-status/ns#term_status"),
+                )
+            )
+            if vs_statuses:
+                return any(str(s) in ("unstable", "testing") for s in vs_statuses)
+
+            # 8) & 9) owl:versionInfo
+            versions = list(self.model.objects(onto_iri, OWL.versionInfo))
+            if versions:
+                for version in versions:
+                    version_str = str(version)
+                    # 8) owl:versionInfo (pre-release extension e.g., "-beta", "-alpha", "-rc" etc)
+                    if is_semver_prerelease(version_str):
+                        return True
+                    # 9) owl:versionInfo (major version zero)
+                    parts = convert_version_string(version_str)
+                    if parts and parts[0] == 0:
+                        return True
+                return False
+
+            return False
+
+        for onto_iri in self.model.subjects(RDF.type, OWL.Ontology):
+            label = str(self.model.value(onto_iri, RDFS.label, default=""))
+            o = Ontology(
+                _id=str(onto_iri),
+                name=label or str(onto_iri),
+                label=label,
+                comment=str(self.model.value(onto_iri, RDFS.comment, default="")),
+                version=str(self.model.value(onto_iri, OWL.versionInfo, default="")),
+                is_prerelease=get_is_prerelease(onto_iri),
+            )
+            self.ontologies.append(o)
 
         class_iris = set(self.model.subjects(RDF.type, OWL.Class)) | set(
             self.model.subjects(RDF.type, OWL.DeprecatedClass)
@@ -191,6 +338,7 @@ class Model(object):
                 is_abstract=is_abstract(cls_iri),
                 named_individuals=get_named_individuals(cls_iri),
                 deprecated=(cls_iri, RDF.type, OWL.DeprecatedClass) in self.model,
+                ontology=get_ontology(cls_iri),
             )
 
             if c.node_kind not in (SH.IRI, SH.BlankNode, SH.BlankNodeOrIRI):
@@ -280,8 +428,8 @@ class Model(object):
         for c in self.classes:
             c.derived_ids.sort()
 
-        self.enums.sort(key=lambda e: e._id)
         self.classes.sort(key=lambda c: c._id)
+        self.ontologies.sort(key=lambda o: o._id)
 
         tmp_classes = self.classes
         done_ids = set()
@@ -306,6 +454,8 @@ class Model(object):
         object with the context applied
         """
         _id = str(_id)
+        if not self.context:
+            return _id
         if _id not in self.compact_ids:
             self.compact_ids[_id] = self.context.compact_iri(_id)
 

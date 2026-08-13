@@ -1,5 +1,6 @@
 # Convert SHACL Model to code bindings
 
+[![PyPI - Version](https://img.shields.io/pypi/v/shacl2code)](https://pypi.org/project/shacl2code/)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/9999/badge)](https://www.bestpractices.dev/projects/9999)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/JPEWdev/shacl2code/badge)](https://scorecard.dev/viewer/?uri=github.com/JPEWdev/shacl2code)
 [![Coverage Report](https://raw.githubusercontent.com/JPEWdev/shacl2code/python-coverage-comment-action-data/badge.svg)](https://htmlpreview.github.io/?https://github.com/JPEWdev/shacl2code/blob/python-coverage-comment-action-data/htmlcov/index.html)
@@ -19,19 +20,19 @@ python3 -m pip install shacl2code
 `shacl2code` can generate bindings from either a local file:
 
 ```shell
-shacl2code generate -i model.jsonld python -o out.py
+shacl2code generate -i model.jsonld python -o out
 ```
 
 Or from a URL:
 
 ```shell
-shacl2code generate -i https://example.com/rdf/model.jsonld python -o out.py
+shacl2code generate -i https://example.com/rdf/model.jsonld python -o out
 ```
 
 Or from stdin:
 
 ```shell
-cat model.jsonld | shacl2code generate -i - python -o - > out.py
+cat model.jsonld | shacl2code generate -i - python -o out
 ```
 
 For more information, run:
@@ -44,6 +45,59 @@ The available language bindings can be viewed by running:
 
 ```shell
 shacl2code list
+```
+
+### Using JSON-LD contexts
+
+When using JSON-LD contexts, the context document shall align with the model.
+
+During model development, there may be cases where the context URL is known
+but not yet live or resolvable. In these situations, you can use the
+`--context-url` option to map your local context file to its future public home.
+
+The `--context-url` option accepts two arguments:
+
+1. `CONTEXT_LOCATION`: The actual path to the local or temporary file
+   containing the context.
+2. `CONTEXT_URL`: The official public URL. While temporarily unresolvable
+   during development, this is the URL that production JSON-LD processors will
+   eventually rely on, so it must be recorded inside the generated JSON Schema.
+
+### Generating the JSON Schema file
+
+`shacl2code` can generate a JSON Schema directly from a model.
+
+To view all options specific to JSON Schema generation, run:
+
+```shell
+shacl2code generate jsonschema -h
+```
+
+#### Example 1: Generating from publicly available URLs
+
+To generate a schema using remote, publicly accessible assets
+(such as SPDX 3.0.1):
+
+```shell
+shacl2code generate \
+    --input https://spdx.org/rdf/3.0.1/spdx-model.ttl \
+    --input https://spdx.org/rdf/3.0.1/spdx-json-serialize-annotations.ttl \
+    --context https://spdx.org/rdf/3.0.1/spdx-context.jsonld \
+    jsonschema \
+    --output spdx-json-schema.json
+```
+
+#### Example 2: Generating with a local context document
+
+To generate a schema using a local context file while embedding its future
+public URL:
+
+```shell
+shacl2code generate \
+    --input model-draft.ttl \
+    --context-url context-draft.jsonld https://example.com/context.jsonld \
+    jsonschema \
+   --output schema.json
 ```
 
 ## Developing
@@ -213,5 +267,66 @@ classes are automatically concrete unless they indicate otherwise.
 It is also possible to define a class as abstract by declaring it to be of
 type: `http://spdx.invalid./AbstractClass`, but this is not preferred.
 
+### Pre-Release models
+
+`shacl2code` can detect if an ontology is a "pre-release" version (still
+subject to breaking changes). For language bindings that support it (such as
+Python), importing a pre-release ontology binding will emit a warning
+(e.g. `FutureWarning`).
+
+Pre-release status can be specified explicitly via command-line options,
+or inferred automatically from various ontology annotations. For example,
+
+```ttl
+<http://example.org/my-ontology> a ow:Ontology ;
+   sh-to-code:isPreRelease true
+   .
+```
+
+Note that the IRI of the ontology must be the prefix of all IRIs that belong to
+that ontology.
+
+In the event of conflicting annotations, `shacl2code` evaluates pre-release
+status using the following order of precedence (1 = the highest priority):
+
+1. **`--pre-release` or `--no-pre-release` command-line options**:
+   Explicitly marks the generated bindings as pre-release or stable,
+   overriding any annotations in the input ontology.
+2. **`sh-to-code:isPreRelease`**:
+   The `shacl2code` custom boolean annotation
+   (`sh-to-code:isPreRelease true` or `false`).
+3. **`adms:status` (EU SEMIC Vocabulary)**:
+   If the status is
+   `<http://publications.europa.eu/resource/authority/dataset-status/DEVELOP>`,
+   it is considered a pre-release.
+   Other values in the dataset-status vocabulary space (e.g. `COMPLETED`)
+   indicate a stable release.
+4. **`adms:status` (Original ADMS Vocabulary)**:
+   If the status is `<http://purl.org/adms/status/UnderDevelopment>`,
+   it is considered a pre-release.
+   Other values in the ADMS status namespace (e.g. `Completed`)
+   indicate a stable release.
+5. **`bibo:status` (Bibliographic Ontology)**:
+   If set to `<http://purl.org/ontology/bibo/status/draft>`, it is
+   considered a pre-release.
+   Other values in the BIBO status namespace (e.g. `published`, `legal`)
+   indicate a stable release.
+6. **`schema:creativeWorkStatus`**:
+   If set to `"Draft"` or `"Incomplete"`, it is considered a pre-release.
+   Other values (e.g. `"Published"`) indicate a stable release.
+7. **`vs:term_status`**:
+   If set to `"unstable"` or `"testing"`, it is considered a pre-release.
+   Other values (e.g. `"stable"`) indicate a stable release.
+8. **`owl:versionInfo` (pre-release extension)**:
+   If the version string contains a pre-release extension suffix
+   (e.g., `-alpha`, `-beta`, `-dev`, `-rc`, `-SNAPSHOT`, `.alpha`, etc.).
+9. **`owl:versionInfo` (major version zero)**:
+   If the version string corresponds to a major version zero in
+   [Semantic Versioning][semver] (e.g., `0.7.1`).
+10. **Default Fallback**:
+    If none of the above are present, the ontology is assumed to be a stable
+    release.
+
 [pytest]: https://www.pytest.org
 [pytest-cov]: https://pytest-cov.readthedocs.io/en/latest/
+[semver]: https://semver.org/

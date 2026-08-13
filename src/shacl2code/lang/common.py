@@ -2,6 +2,7 @@
 # Copyright (c) 2024 Joshua Watt
 #
 # SPDX-License-Identifier: MIT
+"""Common code for language renderers"""
 
 import os
 import sys
@@ -10,7 +11,9 @@ from pathlib import Path
 
 import jinja2
 from jinja2 import Environment, FileSystemLoader, TemplateRuntimeError
+
 from markupsafe import Markup
+
 from rdflib.namespace import SH
 
 from ..model import SHACL2CODE
@@ -35,7 +38,9 @@ class OutputFile(object):
 @jinja2.pass_context
 def include_file(ctx, name):
     env = ctx.environment
-    return Markup(env.loader.get_source(env, name)[0])
+    # Reads this repo's own template source (not user-controlled input) to
+    # embed verbatim into generated source code, never rendered as HTML.
+    return Markup(env.loader.get_source(env, name)[0])  # nosec B704
 
 
 class JinjaTemplateRender(object):
@@ -54,10 +59,14 @@ class JinjaTemplateRender(object):
         if render_args is None:
             render_args = {}  # pragma: no cover
 
-        def abort_helper(msg: str):
+        def abort_helper(msg: str) -> None:
             raise TemplateRuntimeError(msg)
 
-        env = Environment(loader=FileSystemLoader([template.parent, THIS_DIR.parent]))
+        # Templates render source code (C++/Go/Python/Rust), not HTML;
+        # autoescape would corrupt generated code by escaping <, >, & etc.
+        env = Environment(
+            loader=FileSystemLoader([template.parent, THIS_DIR.parent])
+        )  # nosec B701
         for k, v in extra_env.items():
             env.globals[k] = v
         env.globals["abort"] = abort_helper
@@ -116,17 +125,17 @@ class JinjaTemplateRender(object):
             return ni
 
         classes = ObjectList(model.classes)
+        ontologies = ObjectList(model.ontologies)
         concrete_classes = ObjectList(
             list(c for c in model.classes if not c.is_abstract)
         )
         abstract_classes = ObjectList(list(c for c in model.classes if c.is_abstract))
-        enums = ObjectList(model.enums)
 
         render_args = {
             "classes": classes,
+            "ontologies": ontologies,
             "concrete_classes": concrete_classes,
             "abstract_classes": abstract_classes,
-            "enums": enums,
             "context": model.context,
             **self.get_additional_render_args(model),
         }

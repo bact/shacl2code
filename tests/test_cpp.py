@@ -1,18 +1,22 @@
 #
 # Copyright (c) 2024 Joshua Watt
 #
+# SPDX-FileContributor: Joshua Watt
+# SPDX-FileContributor: Arthit Suriyawongkul
+# SPDX-FileCopyrightText: 2024 Joshua Watt
+# SPDX-FileType: SOURCE
 # SPDX-License-Identifier: MIT
 
-from dataclasses import dataclass
-from enum import Enum
 import json
 import multiprocessing
 import os
-from pathlib import Path
 import re
 import shutil
 import subprocess
 import textwrap
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
 
 import pytest
 
@@ -55,6 +59,25 @@ def get_cxx():
     return "g++"
 
 
+@pytest.fixture(scope="module")
+def cxx(tmp_path_factory):
+    compiler = [get_cxx()]
+
+    old_env = os.environ.copy()
+    os.environ["CCACHE_NOHASHDIR"] = "1"
+    os.environ["CCACHE_DEPEND"] = "1"
+    os.environ["CCACHE_BASEDIR"] = str(tmp_path_factory.getbasetemp())
+    os.environ["CCACHE_SLOPPINESS"] = "include_file_ctime,include_file_mtime"
+
+    if ccache := shutil.which("ccache"):
+        compiler = [ccache] + compiler
+
+    try:
+        yield compiler
+    finally:
+        os.environ = old_env
+
+
 @dataclass
 class Lib:
     basename: str
@@ -65,71 +88,76 @@ class Lib:
     directory: Path
 
 
-def build_lib(tmp_path_factory, model_server, tmpname, *, namespace=None):
-    tmp_directory = tmp_path_factory.mktemp(tmpname)
-    basename = "model"
-    out_basename = tmp_directory / basename
-    install_dir = tmp_directory / "install"
-    extra_args = []
-    if namespace is not None:
-        extra_args.extend(["--namespace", namespace])
-    subprocess.run(
-        [
-            "shacl2code",
-            "generate",
-            "--input",
-            TEST_MODEL,
-            "--context",
-            model_server + "/test-context.json",
-            "cpp",
-            "--output",
-            out_basename,
-            "--version=0.0.1",
+@pytest.fixture(scope="module")
+def build_lib(tmp_path_factory, model_server, cxx):
+    def f(name, *, namespace=None):
+        tmp_directory = tmp_path_factory.mktemp(f"cpp-{name}")
+        basename = "model"
+        out_basename = tmp_directory / basename
+        install_dir = tmp_directory / "install"
+        extra_args = []
+        if namespace is not None:
+            extra_args.extend(["--namespace", namespace])
+        subprocess.run(
+            [
+                "shacl2code",
+                "generate",
+                "--input",
+                TEST_MODEL,
+                "--context",
+                model_server + "/test-context.json",
+                "cpp",
+                "--output",
+                out_basename,
+                "--version=0.0.1",
+            ]
+            + extra_args,
+            check=True,
+        )
+        make_args = [
+            "make",
+            "-j" + str(multiprocessing.cpu_count()),
+            "CXXFLAGS=-Wall -Werror -g",
         ]
-        + extra_args,
-        check=True,
-    )
-    make_args = [
-        "make",
-        "-j" + str(multiprocessing.cpu_count()),
-        "CXXFLAGS=-Wall -Werror -g -save-temps",
-    ]
-    cxx = get_cxx()
-    make_args.append(f"CXX={cxx}")
+        make_args.append(f"CXX={' '.join(cxx)}")
 
-    subprocess.run(
-        make_args,
-        check=True,
-        cwd=tmp_directory,
-    )
-    subprocess.run(
-        ["make", "install", "PREFIX=" + str(install_dir)],
-        check=True,
-        cwd=tmp_directory,
-    )
-    pkg_config = tmp_directory / "pkg-config"
-    pkg_config.write_text(textwrap.dedent(f"""\
-            #! /bin/sh
-            export PKG_CONFIG_PATH="{str(install_dir / 'lib' / 'pkgconfig')}"
-            exec pkg-config "$@"
-            """))
-    pkg_config.chmod(0o755)
+        subprocess.run(
+            make_args,
+            check=True,
+            cwd=tmp_directory,
+        )
+        subprocess.run(
+            ["make", "install", "PREFIX=" + str(install_dir)],
+            check=True,
+            cwd=tmp_directory,
+        )
+        pkg_config = tmp_directory / "pkg-config"
+        pkg_config.write_text(textwrap.dedent(f"""\
+                #! /bin/sh
+                export PKG_CONFIG_PATH="{str(install_dir / 'lib' / 'pkgconfig')}"
+                exec pkg-config "$@"
+                """))
+        pkg_config.chmod(0o755)
 
-    return Lib(
-        basename=basename,
-        rpath=install_dir / "lib",
-        bindir=install_dir / "bin",
-        pkg_config=pkg_config,
-        namespace=(
-            re.sub(r"[^a-zA-Z0-9_]", "_", basename) if namespace is None else namespace
-        ),
-        directory=tmp_directory,
-    )
+        return Lib(
+            basename=basename,
+            rpath=install_dir / "lib",
+            bindir=install_dir / "bin",
+            pkg_config=pkg_config,
+            namespace=(
+                re.sub(r"[^a-zA-Z0-9_]", "_", basename)
+                if namespace is None
+                else namespace
+            ),
+            directory=tmp_directory,
+        )
+
+    yield f
 
 
 @pytest.fixture(scope="module")
-def test_lib(tmp_path_factory, model_server):
-    yield build_lib(tmp_path_factory, model_server, "cpptestcontextsrc")
+def test_lib(build_lib):
+    yield build_lib("cpptestcontextsrc")
 
 
 class Progress(Enum):
@@ -141,51 +169,33 @@ class Progress(Enum):
 
 
 @pytest.fixture
-def compile_test(test_lib, tmp_path):
-    def f(code_fragment, *, progress=Progress.RUNS, static=False):
-        src = tmp_path / "test.cpp"
-        src.write_text(
-            textwrap.dedent(f"""\
-                #include "{test_lib.basename}/{test_lib.basename}.hpp"
-                #include "{test_lib.basename}/{test_lib.basename}-jsonld.hpp"
-                #include <iostream>
-                #include <fstream>
-                #include <iomanip>
-
-                using namespace {test_lib.namespace};
-
-                int main(int argc, char** argv) {{
-                    try {{
-                """)
-            + textwrap.dedent(code_fragment)
-            + "".join(
-                textwrap.dedent(f"""\
-                    }} catch ({exc}& e) {{
-                        std::cout << " {enum.name} " << e.what() << std::endl;
-                        return 1;
-                    """)
-                for exc, enum in (
-                    ("ValidationError", Progress.VALIDATION_FAILS),
-                    ("std::bad_cast", Progress.CAST_FAILS),
-                )
-            )
-            + textwrap.dedent("""\
-                    }
-                    return 0;
-                }
-                """)
-        )
+def compile_file(test_lib, tmp_path, cxx):
+    def f(program, filename="test.cpp", *, progress=Progress.RUNS, static=False):
+        src = tmp_path / filename
+        src.write_text(program)
 
         prog = tmp_path / "prog"
-        pkg_config_cmd = f"$({test_lib.pkg_config} --cflags --libs {test_lib.basename})"
+        compile_pkg_config_cmd = (
+            f"$({test_lib.pkg_config} --cflags {test_lib.basename})"
+        )
+        link_pkg_config_cmd = f"$({test_lib.pkg_config} --libs {test_lib.basename})"
 
-        cxx = get_cxx()
-        compile_cmd = [
-            cxx,
-            src,
+        compile_cmd = cxx + [
+            "-MMD",
+            "-MP",
             "-Wall",
             "-Werror",
             "-g",
+            "-c",
+            src,
+            "-o",
+            prog.with_suffix(".o"),
+        ]
+
+        link_cmd = cxx + [
+            prog.with_suffix(".o"),
+            "-Wall",
+            "-Werror",
             "-o",
             prog,
         ]
@@ -198,24 +208,22 @@ def compile_test(test_lib, tmp_path):
                     test_lib.directory / "install" / "lib" / f"lib{test_lib.basename}.a"
                 )
                 pkg_cflags = f"$({test_lib.pkg_config} --cflags {test_lib.basename})"
-                compile_cmd.extend(
-                    [
-                        pkg_cflags,
-                        str(static_lib),
-                    ]
-                )
+                compile_cmd.append(pkg_cflags)
+                link_cmd.append(str(static_lib))
             else:
-                compile_cmd.extend(
+                compile_cmd.append(compile_pkg_config_cmd)
+                link_cmd.extend(
                     [
                         "-Wl,-Bstatic",
-                        pkg_config_cmd,
+                        link_pkg_config_cmd,
                         "-Wl,-Bdynamic",
                     ]
                 )
         else:
-            compile_cmd.extend(
+            compile_cmd.append(compile_pkg_config_cmd)
+            link_cmd.extend(
                 [
-                    pkg_config_cmd,
+                    link_pkg_config_cmd,
                     f"-Wl,-rpath,{test_lib.rpath}",
                 ]
             )
@@ -223,14 +231,22 @@ def compile_test(test_lib, tmp_path):
         compile_script = tmp_path / "compile.sh"
         compile_script.write_text(textwrap.dedent(f"""\
                 #! /bin/sh
-                exec {" ".join(str(s) for s in compile_cmd)}
+                set -e
+                {" ".join(str(s) for s in compile_cmd)}
+                {" ".join(str(s) for s in link_cmd)}
                 """))
         compile_script.chmod(0o755)
+
+        env = os.environ.copy()
+        if progress == Progress.COMPILE_FAILS:
+            env["CCACHE_DISABLE"] = "1"
 
         p = subprocess.run(
             [compile_script],
             stdout=subprocess.PIPE,
             encoding="utf-8",
+            cwd=tmp_path,
+            env=env,
         )
         if progress == Progress.COMPILE_FAILS:
             assert (
@@ -246,6 +262,7 @@ def compile_test(test_lib, tmp_path):
             [prog],
             stdout=subprocess.PIPE,
             encoding="utf-8",
+            cwd=tmp_path,
         )
 
         if progress == Progress.RUN_FAILS:
@@ -275,7 +292,48 @@ def compile_test(test_lib, tmp_path):
     yield f
 
 
-@pytest.mark.parametrize(
+@pytest.fixture
+def compile_test(test_lib, compile_file):
+    def f(code_fragment, **kwargs):
+        return compile_file(
+            textwrap.dedent(f"""\
+                #include "{test_lib.basename}/{test_lib.basename}.hpp"
+                #include "{test_lib.basename}/{test_lib.basename}-jsonld.hpp"
+                #include <iostream>
+                #include <fstream>
+                #include <iomanip>
+
+                using namespace {test_lib.namespace};
+
+                int main(int argc, char** argv) {{
+                    try {{
+                """)
+            + textwrap.dedent(code_fragment)
+            + "".join(
+                textwrap.dedent(f"""\
+                    }} catch ({exc}& e) {{
+                        std::cout << " {enum.name} " << e.what() << std::endl;
+                        return 1;
+                    """)
+                for exc, enum in (
+                    ("ValidationError", Progress.VALIDATION_FAILS),
+                    ("std::bad_cast", Progress.CAST_FAILS),
+                )
+            )
+            + textwrap.dedent(
+                """\
+                    }
+                    return 0;
+                }
+                """
+            ),
+            **kwargs,
+        )
+
+    yield f
+
+
+CPP_MODEL_TESTS = (
     "args,basename",
     [
         (
@@ -288,25 +346,32 @@ def compile_test(test_lib, tmp_path):
         ),
     ],
 )
+
+
+def _generate_cpp(tmp_path, args, basename):
+    subprocess.run(
+        [
+            "shacl2code",
+            "generate",
+        ]
+        + args
+        + [
+            "cpp",
+            "--output",
+            tmp_path / basename,
+            "--version=0.0.1",
+        ],
+        check=True,
+    )
+
+
+@pytest.mark.parametrize(*CPP_MODEL_TESTS)
 class TestOutput:
     def test_trailing_whitespace(self, tmp_path, args, basename):
         """
         Tests that the generated file does not have trailing whitespace
         """
-        subprocess.run(
-            [
-                "shacl2code",
-                "generate",
-            ]
-            + args
-            + [
-                "cpp",
-                "--output",
-                tmp_path / basename,
-                "--version=0.0.1",
-            ],
-            check=True,
-        )
+        _generate_cpp(tmp_path, args, basename)
 
         for fn in tmp_path.iterdir():
             with fn.open("r") as f:
@@ -320,20 +385,7 @@ class TestOutput:
         """
         Tests that the output file doesn't contain tabs
         """
-        subprocess.run(
-            [
-                "shacl2code",
-                "generate",
-            ]
-            + args
-            + [
-                "cpp",
-                "--output",
-                tmp_path / basename,
-                "--version=0.0.1",
-            ],
-            check=True,
-        )
+        _generate_cpp(tmp_path, args, basename)
 
         for fn in tmp_path.iterdir():
             if fn.name == "Makefile":
@@ -345,29 +397,15 @@ class TestOutput:
                         "\t" not in line
                     ), f"{fn}: Line {lineno + 1} has tabs: {line!r}"
 
-    def test_output_compile(self, tmp_path, args, basename):
-        subprocess.run(
-            [
-                "shacl2code",
-                "generate",
-            ]
-            + args
-            + [
-                "cpp",
-                "--output",
-                tmp_path / basename,
-                "--version=0.0.1",
-            ],
-            check=True,
-        )
+    def test_output_compile(self, cxx, tmp_path, args, basename):
+        _generate_cpp(tmp_path, args, basename)
 
         make_args = [
             "make",
             "-j" + str(multiprocessing.cpu_count()),
-            "CXXFLAGS=-Wall -Werror -g -save-temps",
+            "CXXFLAGS=-Wall -Werror -g",
         ]
-        cxx = get_cxx()
-        make_args.append(f"CXX={cxx}")
+        make_args.append(f"CXX={' '.join(cxx)}")
 
         subprocess.run(
             make_args,
@@ -383,68 +421,66 @@ class TestOutput:
         )
 
 
+@pytest.mark.parametrize(*CPP_MODEL_TESTS)
+class TestStaticAnalysis:
+    """
+    Static analysis checks for the generated C++ code
+    """
+
+    def test_cppcheck(self, tmp_path, args, basename):
+        """
+        cppcheck static analysis.
+
+        Excludes the bundled "-jsonld" source, not generated code.
+
+        duplInheritedMember is suppressed: every generated class
+        deliberately redeclares its own static Type descriptor.
+        """
+        _generate_cpp(tmp_path, args, basename)
+
+        sources = sorted(
+            p
+            for p in tmp_path.iterdir()
+            if p.suffix in (".c", ".cpp", ".h", ".hpp") and "-jsonld" not in p.name
+        )
+
+        subprocess.run(
+            [
+                "cppcheck",
+                "--enable=performance,portability,warning",
+                "--error-exitcode=1",
+                "--suppress=duplInheritedMember",
+            ]
+            + sources,
+            check=True,
+            cwd=tmp_path,
+        )
+
+
 def test_compile(compile_test):
     compile_test("")
 
 
-def test_headers(test_lib, tmp_path):
+def test_headers(test_lib, compile_file):
     for h in test_lib.directory.glob("*.hpp"):
-        src = tmp_path / (h.name + ".cpp")
-        src.write_text(textwrap.dedent(f"""\
+        compile_file(
+            textwrap.dedent(f"""\
                 #include <{test_lib.basename}/{h.name}>
 
                 int main(int argc, char** argv) {{
                     return 0;
                 }}
-                """))
-
-        prog = tmp_path / "prog"
-        pkg_config_cmd = f"$({test_lib.pkg_config} --cflags --libs {test_lib.basename})"
-
-        cxx = get_cxx()
-        compile_cmd = [
-            cxx,
-            src,
-            "-Wall",
-            "-Werror",
-            "-g",
-            "-o",
-            prog,
-            pkg_config_cmd,
-            f"-Wl,-rpath,{test_lib.rpath}",
-        ]
-
-        compile_script = tmp_path / "compile.sh"
-        compile_script.write_text(textwrap.dedent(f"""\
-                #! /bin/sh
-                exec {" ".join(str(s) for s in compile_cmd)}
-                """))
-        compile_script.chmod(0o755)
-
-        subprocess.run(
-            [compile_script],
-            stdout=subprocess.PIPE,
-            encoding="utf-8",
-            check=True,
+                """),
+            h.name + ".cpp",
         )
 
 
-def test_namespace(tmp_path_factory, model_server):
-    build_lib(
-        tmp_path_factory,
-        model_server,
-        "cppnamespace",
-        namespace="foo::bar",
-    )
+def test_namespace(build_lib):
+    build_lib("cppnamespace", namespace="foo::bar")
 
 
-def test_no_namespace(tmp_path_factory, model_server):
-    build_lib(
-        tmp_path_factory,
-        model_server,
-        "cppnamespace",
-        namespace="",
-    )
+def test_no_namespace(build_lib):
+    build_lib("cppnamespace", namespace="")
 
 
 C_STRING_VAL = '"string"'
@@ -546,15 +582,19 @@ CPP_STRING_VAL = 'std::string("string")'
         # Enumerated value
         (
             "_test_class_enum_prop",
-            '"http://example.org/enumType/foo"',
-            "http://example.org/enumType/foo",
+            '"http://example.org/shacl2code-test/enumType/foo"',
+            "http://example.org/shacl2code-test/enumType/foo",
         ),
         (
             "_test_class_enum_prop",
-            'std::string("http://example.org/enumType/foo")',
-            "http://example.org/enumType/foo",
+            'std::string("http://example.org/shacl2code-test/enumType/foo")',
+            "http://example.org/shacl2code-test/enumType/foo",
         ),
-        ("_test_class_enum_prop", "enumType::foo", "http://example.org/enumType/foo"),
+        (
+            "_test_class_enum_prop",
+            "enumType::foo",
+            "http://example.org/shacl2code-test/enumType/foo",
+        ),
         ("_test_class_enum_prop", C_STRING_VAL, Progress.VALIDATION_FAILS),
         ("_test_class_enum_prop", CPP_STRING_VAL, Progress.VALIDATION_FAILS),
         ("_test_class_enum_prop", "0", Progress.RUN_FAILS),
@@ -670,7 +710,7 @@ def test_scalar_prop_validation(compile_test, prop, value, expect):
         (
             "_test_class_class_prop",
             "test_class::named",
-            "IRI http://example.org/test-class/named",
+            "IRI http://example.org/shacl2code-test/test-class/named",
         ),
         # Named individual, but wrong type
         (
