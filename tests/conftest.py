@@ -120,6 +120,8 @@ def test_jsonschema_additional_props(model_server, test_context_url):
             MODEL_DIR / "test.ttl",
             "--context",
             test_context_url,
+            "--jss-signature",
+            "signatures",
             "jsonschema",
             "--use-additional-properties",
             "--output",

@@ -187,7 +187,10 @@
                 "properties": {
                     "{{ class.id_property or "@id" }}": { "$ref": "#/$defs/{{ class.node_kind.split("#")[-1] }}" },
                     "{{ context.compact_iri("@type") }}": { "type": "string" },
-                    "@context": {}{% if all_props %},{% endif %}
+                    "@context": {}{% if jss_signature or all_props %},{% endif %}
+                    {%- if jss_signature %}
+                    "{{ jss_signature }}": { "$ref": "#/$defs/JSSsignatures" }{% if all_props %},{% endif %}
+                    {%- endif %}
                     {%- for def_class, prop in all_props %}
                     {%- set is_list = prop.max_count is none or prop.max_count != 1 %}
                     {%- set prop_ref = "#/$defs/prop_" + varname(*def_class.clsname) + "_" + varname(prop.varname) %}
