@@ -32,13 +32,14 @@ SPDX3_CONTEXT_URL = "https://spdx.github.io/spdx-3-model/context.json"
 
 
 @pytest.mark.parametrize(
-    "generate_args,schema_args",
+    "args,schema_args",
     [
         (["--input", TEST_MODEL], []),
         (
             ["--input", TEST_MODEL, "--context-url", TEST_CONTEXT, SPDX3_CONTEXT_URL],
             [],
         ),
+        (["--input", TEST_MODEL, "--jss-signature", "signatures"], []),
         (["--input", TEST_MODEL], ["--use-additional-properties"]),
         (
             ["--input", TEST_MODEL, "--context-url", TEST_CONTEXT, SPDX3_CONTEXT_URL],
@@ -47,32 +48,35 @@ SPDX3_CONTEXT_URL = "https://spdx.github.io/spdx-3-model/context.json"
     ],
 )
 class TestOutput:
-    def test_output_syntax(self, generate_args, schema_args):
+    def test_output_syntax(self, args, schema_args, tmp_path):
         """
         Checks that the output file is valid json syntax by parsing it with Python
         """
-        p = subprocess.run(
+        schema_file = tmp_path / "schema.json"
+
+        subprocess.run(
             [
                 "shacl2code",
                 "generate",
             ]
-            + generate_args
+            + args
             + [
                 "jsonschema",
             ]
             + schema_args
             + [
                 "--output",
-                "-",
+                schema_file,
             ],
             check=True,
             stdout=subprocess.PIPE,
             encoding="utf-8",
         )
 
-        json.loads(p.stdout)
+        with schema_file.open("r") as f:
+            json.load(f)
 
-    def test_ajv_compile(self, tmp_path, generate_args, schema_args):
+    def test_ajv_compile(self, tmp_path, args, schema_args):
         """
         Validates the generated schema against the JSON Schema meta-schema using ajv
         """
@@ -82,7 +86,7 @@ class TestOutput:
                 "shacl2code",
                 "generate",
             ]
-            + generate_args
+            + args
             + [
                 "jsonschema",
             ]
@@ -102,7 +106,7 @@ class TestOutput:
             check=True,
         )
 
-    def test_trailing_whitespace(self, generate_args, schema_args):
+    def test_trailing_whitespace(self, args, schema_args):
         """
         Tests that the generated file does not have trailing whitespace
         """
@@ -111,7 +115,7 @@ class TestOutput:
                 "shacl2code",
                 "generate",
             ]
-            + generate_args
+            + args
             + [
                 "jsonschema",
             ]
@@ -130,7 +134,7 @@ class TestOutput:
                 re.search(r"\s+$", line) is None
             ), f"Line {num + 1} has trailing whitespace"
 
-    def test_tabs(self, generate_args, schema_args):
+    def test_tabs(self, args, schema_args):
         """
         Tests that the output file doesn't contain tabs
         """
@@ -139,7 +143,7 @@ class TestOutput:
                 "shacl2code",
                 "generate",
             ]
-            + generate_args
+            + args
             + [
                 "jsonschema",
             ]

@@ -65,12 +65,7 @@ def shacl2code_generate(args, python_args, outfile):
 
 
 @pytest.fixture(scope="module")
-def model_context_url(model_server):
-    yield model_server + "/test-context.json"
-
-
-@pytest.fixture(scope="module")
-def python_model(tmp_path_factory, model_context_url):
+def python_model(tmp_path_factory, test_context_url):
     tmp_directory = tmp_path_factory.mktemp("pythontestcontext")
     module_name = "pymodel"
     output_dir = tmp_directory / module_name
@@ -79,7 +74,9 @@ def python_model(tmp_path_factory, model_context_url):
             "--input",
             TEST_MODEL,
             "--context",
-            model_context_url,
+            test_context_url,
+            "--jss-signature",
+            "signatures",
         ],
         [
             "--version",
@@ -154,6 +151,11 @@ MODEL_TESTS = (
             id="No main",
         ),
         pytest.param(["--input", TEST_MODEL], ["--version=1.0.0"], id="Version"),
+        pytest.param(
+            ["--input", TEST_MODEL, "--jss-signature", "signatures"],
+            [],
+            id="JSS Signature",
+        ),
     ],
 )
 
@@ -472,6 +474,73 @@ def test_jsonschema_validation(roundtrip, test_jsonschema):
         data = json.load(f)
 
     jsonschema.validate(data, schema=test_jsonschema)
+
+
+# TODO: Make python bindings pass the other JSON validation tests
+@pytest.mark.parametrize(
+    "passes,data",
+    [
+        pytest.param(
+            True,
+            {
+                "@context": jsonvalidation.CONTEXT,
+                "@graph": [
+                    {
+                        "@type": "test-class",
+                    },
+                ],
+                "signatures": [],
+            },
+            id="JSS Signature",
+        ),
+        pytest.param(
+            False,
+            {
+                "@context": jsonvalidation.CONTEXT,
+                "@graph": [
+                    {
+                        "@type": "test-class",
+                    },
+                ],
+                "unknown": {},
+            },
+            id="Unknown top level property with @graph",
+        ),
+        pytest.param(
+            True,
+            {
+                "@context": jsonvalidation.CONTEXT,
+                "@type": "test-class",
+                "signatures": [],
+            },
+            id="Inline with signature",
+        ),
+        pytest.param(
+            False,
+            {
+                "@context": jsonvalidation.CONTEXT,
+                "@graph": [
+                    {
+                        "@type": "test-class",
+                    },
+                ],
+                "signatures": "string",
+            },
+            id="Signature with wrong type",
+        ),
+    ],
+)
+def test_json_validation(passes, data, tmp_path, test_context_url, model_script):
+    jsonvalidation.replace_context(data, test_context_url)
+
+    data_file = tmp_path / "data.json"
+    data_file.write_text(json.dumps(data))
+
+    p = subprocess.run([model_script, data_file, "--outfile", os.devnull], check=False)
+    if passes:
+        assert p.returncode == 0
+    else:
+        assert p.returncode != 0
 
 
 @jsonvalidation.link_tests()
@@ -2047,7 +2116,7 @@ def test_varname_reserved_words(tmp_path):
                 del sys.modules[mod]
 
 
-def test_extensible_properties(model, model_context_url):
+def test_extensible_properties(model, test_context_url):
 
     class Extension(model.extensible_class):
         TYPE = "http://example.org/shacl2code-test/extension"
@@ -2062,7 +2131,7 @@ def test_extensible_properties(model, model_context_url):
 
     DATA = {
         "@context": [
-            model_context_url,
+            test_context_url,
             {
                 "prefix": "http://example.org/shacl2code-test/",
             },
@@ -2095,7 +2164,7 @@ def test_extensible_properties(model, model_context_url):
     assert s.serialize_data(objset, True) == DATA
 
 
-def test_custom_objset_index(model, model_context_url):
+def test_custom_objset_index(model, test_context_url):
     # Creates a derived objectset that indexes objects based on a property
     class ObjectSet(model.SHACLObjectSet):
         def create_index(self):
@@ -2111,7 +2180,7 @@ def test_custom_objset_index(model, model_context_url):
     d = model.JSONLDDeserializer()
     d.deserialize_data(
         {
-            "@context": model_context_url,
+            "@context": test_context_url,
             "@graph": [
                 {
                     "@type": "test-class",
@@ -2320,7 +2389,7 @@ def test_prerelease_warning(model):
         model.test_class()
 
 
-def test_pre_release_cli_option(tmp_path_factory, model_context_url):
+def test_pre_release_cli_option(tmp_path_factory, test_context_url):
     tmp_directory = tmp_path_factory.mktemp("prerelease_test")
     module_name = "pymodel_prerelease"
     output_dir = tmp_directory / module_name
@@ -2329,7 +2398,7 @@ def test_pre_release_cli_option(tmp_path_factory, model_context_url):
             "--input",
             str(TEST_MODEL),
             "--context",
-            model_context_url,
+            test_context_url,
             "--pre-release",
         ],
         [
@@ -2345,9 +2414,12 @@ def test_pre_release_cli_option(tmp_path_factory, model_context_url):
         assert m.SHACL2CODE_TEST.is_prerelease is True
     finally:
         sys.path.remove(str(tmp_directory))
+        for mod in list(sys.modules):
+            if mod == module_name or mod.startswith(module_name + "."):
+                del sys.modules[mod]
 
 
-def test_no_pre_release_cli_option(tmp_path, model_context_url):
+def test_no_pre_release_cli_option(tmp_path, test_context_url):
     ttl_content = """
 @base <http://example.org/shacl2code-test/> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
@@ -2371,7 +2443,7 @@ def test_no_pre_release_cli_option(tmp_path, model_context_url):
             "--input",
             str(ttl_file),
             "--context",
-            model_context_url,
+            test_context_url,
         ],
         [
             "--version",
@@ -2394,7 +2466,7 @@ def test_no_pre_release_cli_option(tmp_path, model_context_url):
             "--input",
             str(ttl_file),
             "--context",
-            model_context_url,
+            test_context_url,
             "--no-pre-release",
         ],
         [
@@ -2412,7 +2484,7 @@ def test_no_pre_release_cli_option(tmp_path, model_context_url):
         sys.path.remove(str(tmp_path))
 
 
-def test_pre_release_annotations_cases(tmp_path, model_context_url):
+def test_pre_release_annotations_cases(tmp_path, test_context_url):
     # The number in the comment indicates the precedence of the annotation.
     # 1 is the highest precedence (force by command line option)
     cases = [
@@ -2485,7 +2557,7 @@ def test_pre_release_annotations_cases(tmp_path, model_context_url):
                 "--input",
                 str(ttl_file),
                 "--context",
-                model_context_url,
+                test_context_url,
             ],
             [
                 "--version",
@@ -2504,7 +2576,7 @@ def test_pre_release_annotations_cases(tmp_path, model_context_url):
             sys.path.remove(str(tmp_path))
 
 
-def test_pre_release_precedence(tmp_path, model_context_url):
+def test_pre_release_precedence(tmp_path, test_context_url):
     # Example 1:
     # 2) sh-to-code:isPreRelease false (False)
     # 3) adms:status EU SEMIC DEVELOP (True)
@@ -2532,7 +2604,7 @@ def test_pre_release_precedence(tmp_path, model_context_url):
             "--input",
             str(ttl_file_1),
             "--context",
-            model_context_url,
+            test_context_url,
         ],
         [
             "--version",
@@ -2575,7 +2647,7 @@ def test_pre_release_precedence(tmp_path, model_context_url):
             "--input",
             str(ttl_file_2),
             "--context",
-            model_context_url,
+            test_context_url,
         ],
         [
             "--version",
@@ -2618,7 +2690,7 @@ def test_pre_release_precedence(tmp_path, model_context_url):
             "--input",
             str(ttl_file_3),
             "--context",
-            model_context_url,
+            test_context_url,
         ],
         [
             "--version",
@@ -2661,7 +2733,7 @@ def test_pre_release_precedence(tmp_path, model_context_url):
             "--input",
             str(ttl_file_4),
             "--context",
-            model_context_url,
+            test_context_url,
         ],
         [
             "--version",
@@ -2704,7 +2776,7 @@ def test_pre_release_precedence(tmp_path, model_context_url):
             "--input",
             str(ttl_file_5),
             "--context",
-            model_context_url,
+            test_context_url,
         ],
         [
             "--version",
@@ -2721,7 +2793,7 @@ def test_pre_release_precedence(tmp_path, model_context_url):
         sys.path.remove(str(tmp_path))
 
 
-def test_pre_release_multi_valued_annotations(tmp_path, model_context_url):
+def test_pre_release_multi_valued_annotations(tmp_path, test_context_url):
     # Each of these predicates can legally repeat.
     # A stable-looking value listed first must not hide
     # a pre-release-indicating value listed after it.
@@ -2795,7 +2867,7 @@ bibo:status <http://purl.org/ontology/bibo/status/draft> .
                 "--input",
                 str(ttl_file),
                 "--context",
-                model_context_url,
+                test_context_url,
             ],
             [
                 "--version",

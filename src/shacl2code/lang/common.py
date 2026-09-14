@@ -22,6 +22,11 @@ from ..version import VERSION
 THIS_DIR = Path(__file__).parent
 
 
+def prop_is_list(prop):
+    """Whether a property's max_count allows more than one value."""
+    return prop.max_count is None or prop.max_count != 1
+
+
 class OutputFile(object):
     def __init__(self, path):
         self.path = path
@@ -96,15 +101,18 @@ class JinjaTemplateRender(object):
         class ObjectList(object):
             def __init__(self, objs):
                 self.__objs = objs
+                self.__objs_by_id = {}
+                for o in objs:
+                    self.__objs_by_id.setdefault(o._id, o)
 
             def __iter__(self):
                 return iter(self.__objs)
 
             def get(self, _id):
-                for o in self.__objs:
-                    if o._id == _id:
-                        return o
-                raise KeyError(f"Object with ID {_id} not found")
+                try:
+                    return self.__objs_by_id[_id]
+                except KeyError:
+                    raise KeyError(f"Object with ID {_id} not found") from None
 
         def get_all_derived(cls):
             def _recurse(cls):
@@ -140,6 +148,7 @@ class JinjaTemplateRender(object):
             "concrete_classes": concrete_classes,
             "abstract_classes": abstract_classes,
             "context": model.context,
+            "jss_signature": model.jss_signature,
             **self.get_additional_render_args(model),
         }
 
@@ -147,6 +156,7 @@ class JinjaTemplateRender(object):
             "get_all_derived": get_all_derived,
             "get_all_named_individuals": get_all_named_individuals,
             "include_file": include_file,
+            "prop_is_list": prop_is_list,
             **self.get_extra_env(),
             **self.get_extra_model_env(classes),
         }
