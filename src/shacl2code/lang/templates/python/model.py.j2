@@ -3241,7 +3241,7 @@ CONTEXT_URLS: List[str] = [
 {%- endfor %}
 {{ '"' }}{{ '"' }}{{ '"' }}
 {% endif %}
-{{ varname(o.name).upper() }} = Ontology(
+{{ ontology_constname(o.name) }} = Ontology(
     iri="{{ o._id }}",
     is_prerelease={{ o.is_prerelease }},
 {%- if o.version %}
@@ -3252,10 +3252,10 @@ CONTEXT_URLS: List[str] = [
 
 # CLASSES
 {%- for class in classes %}
-class {{ varname(*class.clsname) }}(
+class {{ class_pyname(class) }}(
 {%- if class.parent_ids %}
     {%- for id in class.parent_ids -%}
-        {{- varname(*classes.get(id).clsname) }}{%- if not loop.last or class.is_extensible -%}, {% endif -%}
+        {{- class_pyname(classes.get(id)) }}{%- if not loop.last or class.is_extensible -%}, {% endif -%}
     {%- endfor -%}
     {%- if class.is_extensible -%}
         SHACLExtensibleObject
@@ -3281,7 +3281,7 @@ class {{ varname(*class.clsname) }}(
     {%- if class.deprecated %}
     IS_DEPRECATED: ClassVar[bool] = True
     {%- endif %}
-    ONTOLOGY: ClassVar[Optional[Ontology]] = {% if class.ontology %}{{ varname(class.ontology.name).upper() }}{% else %}None{% endif %}
+    ONTOLOGY: ClassVar[Optional[Ontology]] = {% if class.ontology %}{{ ontology_constname(class.ontology.name) }}{% else %}None{% endif %}
     {%- if class.named_individuals %}
     NAMED_INDIVIDUALS: ClassVar[Dict[str, str]] = {
         {%- for member in class.named_individuals %}
@@ -3329,7 +3329,7 @@ class {{ varname(*class.clsname) }}(
                         {{- ctx.append((value, context.compact_vocab(value, prop.path))) or "" }}
                     {%- endif %}
                 {%- endfor -%}
-                ObjectProp({{ varname(*classes.get(prop.class_id).clsname) }}, {% if prop.min_count and not is_list %}True{% else %}False{% endif %}{% if ctx %}, context=(
+                ObjectProp({{ class_pyname(classes.get(prop.class_id)) }}, {% if prop.min_count and not is_list %}True{% else %}False{% endif %}{% if ctx %}, context=(
                 {%- for value, compact in ctx %}
                     ("{{ value }}", "{{ compact }}"),
                 {%- endfor %}

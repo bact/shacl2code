@@ -595,15 +595,15 @@ def decode_context(decoder: Any, objectset: SHACLObjectSet) -> List[str]: ...
 """Format Guard{{ '"' }}{{ '"' }}{{ '"' }}
 # ONTOLOGIES
 {%- for o in ontologies %}
-{{ varname(o.name).upper() }}: Ontology
+{{ ontology_constname(o.name) }}: Ontology
 {%- endfor %}
 
 # CLASSES
 {%- for class in classes %}
-class {{ varname(*class.clsname) }}(
+class {{ class_pyname(class) }}(
 {%- if class.parent_ids %}
     {%- for id in class.parent_ids -%}
-        {{- varname(*classes.get(id).clsname) }}{%- if not loop.last or class.is_extensible -%}, {% endif -%}
+        {{- class_pyname(classes.get(id)) }}{%- if not loop.last or class.is_extensible -%}, {% endif -%}
     {%- endfor -%}
     {%- if class.is_extensible -%}
         SHACLExtensibleObject

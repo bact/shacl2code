@@ -62,8 +62,14 @@ SHACLOBJECT_RESERVED_WORDS = {
     "property_keys",
     "set_id",
     "walk",
-    # __init__.py.j2's own top-level names; a same-named class/property
-    # would silently shadow them (or be shadowed by them).
+}
+
+
+# __init__.py.j2's own top-level names. Only class/ontology names become
+# real top-level package attributes and can collide with these; properties
+# (instance attributes) never can, so keep this separate from
+# SHACLOBJECT_RESERVED_WORDS.
+PACKAGE_RESERVED_WORDS = {
     "IS_PRERELEASE",
     "TYPE_CHECKING",
 }
@@ -84,6 +90,25 @@ def varname(*name):
     return name
 
 
+def class_pyname(cls: Class) -> str:
+    """Python name for cls. Use at every reference site (definition, base
+    class lists, property types), not just the definition, for consistency."""
+    name = varname(*cls.clsname)
+    while name in PACKAGE_RESERVED_WORDS:
+        name = name + "_"
+    return name
+
+
+def ontology_constname(name: str) -> str:
+    """Python constant name for an Ontology: varname(), upper-cased, then
+    checked against PACKAGE_RESERVED_WORDS (post-upper(), since upper() can
+    itself create a collision varname() didn't see)."""
+    result = varname(name).upper()
+    while result in PACKAGE_RESERVED_WORDS:
+        result = result + "_"
+    return result
+
+
 def prop_shape(prop):
     """Classify a property's container shape: (is_list, has_ref, is_enum)."""
     is_enum = bool(prop.enum_values)
@@ -100,7 +125,7 @@ def prop_element_pytype(prop, classes):
     if prop.enum_values:
         return "str"
     if prop.class_id:
-        return "Union[str, '" + varname(*classes.get(prop.class_id).clsname) + "']"
+        return "Union[str, '" + class_pyname(classes.get(prop.class_id)) + "']"
     if prop.datatype not in DATATYPE_PYTHON_TYPES:
         # Same error as model.py.j2's abort()
         raise TemplateRuntimeError("Unknown data type " + prop.datatype)
@@ -270,6 +295,8 @@ class PythonRender(JinjaTemplateRender):
     def get_extra_env(self):
         return {
             "varname": varname,
+            "class_pyname": class_pyname,
+            "ontology_constname": ontology_constname,
             "prop_element_pytype": prop_element_pytype,
             "prop_shape": prop_shape,
             "protocol_discriminator_name": protocol_discriminator_name,
