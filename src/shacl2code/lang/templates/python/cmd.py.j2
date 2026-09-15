@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .model import DataPath, SHACLObject, SHACLObjectSet
+    from .model import DataPath, SHACLObjectSet
 
 # NOTE: .model is imported inside each function below, not here, because
 # __init__.py can import this module just to fetch "main" (e.g. dir()),
