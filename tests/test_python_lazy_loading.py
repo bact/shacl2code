@@ -123,3 +123,85 @@ class TestModelAll:
             for m in list(sys.modules):
                 if m == module_name or m.startswith(module_name + "."):
                     del sys.modules[m]
+
+    def test_shacl_class_named_like_a_reserved_scaffolding_name(
+        self, tmp_path: Path
+    ) -> None:
+        """A SHACL class named e.g. "TYPE_CHECKING" must not be shadowed by
+        __init__.py's own scaffolding of the same name -- __getattr__ is
+        only consulted when a real top-level name isn't found first, so
+        varname() must rename the colliding class instead."""
+        ttl_content = """
+@base <http://example.org/shacl2code-test/> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+
+<http://example.org/shacl2code-test> a owl:Ontology ;
+    rdfs:comment "A test ontology" ;
+    rdfs:label "shacl2code-test" ;
+    owl:versionInfo "1.0.0" .
+
+<shadow-class> a sh:NodeShape, owl:Class ;
+    rdfs:comment "Compact name collides with typing.TYPE_CHECKING" .
+"""
+        ttl_file = tmp_path / "shadow.ttl"
+        ttl_file.write_text(ttl_content)
+
+        context_content = """
+{
+  "@context": {
+    "@base": "http://example.org/shacl2code-test/",
+    "TYPE_CHECKING": "http://example.org/shacl2code-test/shadow-class"
+  }
+}
+"""
+        context_file = tmp_path / "shadow-context.json"
+        context_file.write_text(context_content)
+
+        module_name = "pymodel_reserved_name_shadow"
+        output_dir = tmp_path / module_name
+        shacl2code_generate(
+            [
+                "--input",
+                str(ttl_file),
+                "--context-url",
+                str(context_file),
+                "https://example.com/shadow-context.jsonld",
+            ],
+            [],
+            output_dir,
+        )
+
+        sys.path.insert(0, str(tmp_path))
+        try:
+            m = importlib.import_module(module_name)
+
+            # Real typing flag: unaffected.
+            assert m.TYPE_CHECKING is False
+
+            # Colliding class: renamed, not dropped.
+            assert hasattr(m, "TYPE_CHECKING_")
+            cls = m.TYPE_CHECKING_
+            assert issubclass(cls, m.SHACLObject)
+            assert cls().get_type() == "http://example.org/shacl2code-test/shadow-class"
+
+            # `import *` exposes the renamed class, not the typing flag.
+            ns: dict = {}
+            exec(f"from {module_name} import *", ns)
+            imported = {k for k in ns if not k.startswith("__")}
+            assert "TYPE_CHECKING_" in imported
+            assert "TYPE_CHECKING" not in imported
+
+            # __init__.py's own scaffolding names must not leak, renamed or
+            # not. vars(m), not dir(m): dir() also merges in model.py's
+            # namespace, which legitimately has its own "Any" import.
+            assert not (
+                {"Any", "Callable", "Dict", "List", "TypeVar", "ModuleType"}
+                & set(vars(m))
+            )
+        finally:
+            sys.path.remove(str(tmp_path))
+            for mod in list(sys.modules):
+                if mod == module_name or mod.startswith(module_name + "."):
+                    del sys.modules[mod]

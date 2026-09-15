@@ -8,10 +8,16 @@ from __future__ import annotations
 
 import importlib
 import warnings
-from types import ModuleType
-from typing import Any, Callable, Dict, List, TYPE_CHECKING, TypeVar
+from types import ModuleType as _ModuleType
+from typing import TYPE_CHECKING, TypeVar as _TypeVar
 
 if TYPE_CHECKING:
+    from typing import Any as _Any, Callable as _Callable, Dict as _Dict, List as _List
+
+    # Annotation-only (see "from __future__ import annotations" above), so
+    # keeping them out of the runtime namespace avoids shadowing a
+    # same-named SHACL class.
+
     from .model import *  # noqa: F401, F403
 
 # True if any ontology behind this model is pre-release.
@@ -32,7 +38,7 @@ if TYPE_CHECKING:
 {%- endif %}
 
 
-_LAZY_SUBMODULES: Dict[str, Callable[[], Any]] = {
+_LAZY_SUBMODULES: _Dict[str, _Callable[[], _Any]] = {
 {%- if include_protocols %}
     "protocols": lambda: importlib.import_module(f"{__name__}.protocols"),
 {%- endif %}
@@ -42,7 +48,7 @@ _LAZY_SUBMODULES: Dict[str, Callable[[], Any]] = {
 }
 
 
-def __getattr__(name: str) -> Any:
+def __getattr__(name: str) -> _Any:
     # PEP 562 lazy access: each branch imports only what it needs.
     if name == "__all__":
         # Only "import *" needs this; it must load the model to compute it.
@@ -52,7 +58,7 @@ def __getattr__(name: str) -> Any:
             for n, o in vars(mod).items()
             if not n.startswith("_")
             and n != "TYPE_CHECKING"  # imported flag, not model content
-            and not isinstance(o, (TypeVar, ModuleType))
+            and not isinstance(o, (_TypeVar, _ModuleType))
             and (
                 getattr(o, "__module__", None) == mod.__name__
                 or getattr(o, "__module__", None) is None  # plain constants
@@ -67,7 +73,7 @@ def __getattr__(name: str) -> Any:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-def __dir__() -> List[str]:
+def __dir__() -> _List[str]:
     # Opt-in: model loads only when dir() is actually called.
     mod = importlib.import_module(f"{__name__}.model")
     names = set(globals()) | set(dir(mod)) | set(_LAZY_SUBMODULES)

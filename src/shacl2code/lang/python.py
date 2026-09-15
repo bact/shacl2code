@@ -62,6 +62,10 @@ SHACLOBJECT_RESERVED_WORDS = {
     "property_keys",
     "set_id",
     "walk",
+    # __init__.py.j2's own top-level names; a same-named class/property
+    # would silently shadow them (or be shadowed by them).
+    "IS_PRERELEASE",
+    "TYPE_CHECKING",
 }
 
 

@@ -343,6 +343,7 @@ def is_blank_node(s: Any) -> bool: ...
 """Format Guard{{ '"' }}{{ '"' }}{{ '"' }}
 {% if version_str %}VERSION_STRING: str{% endif %}
 {% if version %}VERSION: tuple[int, ...]{% endif %}
+CONTEXT_URLS: List[str]
 {{ '"' }}{{ '"' }}{{ '"' }}Format Guard"""
 # fmt: on
 
