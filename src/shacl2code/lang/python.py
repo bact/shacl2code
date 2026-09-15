@@ -257,6 +257,7 @@ class PythonRender(JinjaTemplateRender):
 
         if self.__include_main:
             yield get_file("cmd.py")
+            yield get_file("cmd.pyi")
             yield get_file("__main__.py")
 
         if self.__include_protocols:

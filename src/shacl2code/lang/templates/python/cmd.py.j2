@@ -8,17 +8,17 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Any, Iterable, List, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .model import SHACLObject
+    from .model import DataPath, SHACLObject, SHACLObjectSet
 
 # NOTE: .model is imported inside each function below, not here, because
 # __init__.py can import this module just to fetch "main" (e.g. dir()),
 # without calling it -- that must not force the model to load.
 
 
-def print_tree(objects: Iterable[SHACLObject], all_fields: bool = False) -> None:
+def print_tree(objectset: SHACLObjectSet, all_fields: bool = False) -> None:
     """
     Print object tree
     """
@@ -26,7 +26,7 @@ def print_tree(objects: Iterable[SHACLObject], all_fields: bool = False) -> None
 
     seen = set()
 
-    def callback(value: Any, path: List[str]) -> bool:
+    def callback(value: Any, path: DataPath) -> bool:
         s = ("  " * (len(path) - 1)) + f"{path[-1]}"
         if isinstance(value, SHACLObject):
             s += f" {value} ({id(value)})"
@@ -50,8 +50,7 @@ def print_tree(objects: Iterable[SHACLObject], all_fields: bool = False) -> None
 
         return True
 
-    for o in objects:
-        o.walk(callback)
+    objectset.walk(callback)
 
 
 def main() -> int:
@@ -74,7 +73,7 @@ def main() -> int:
         d.read(f, objectset)
 
     if args.print:
-        print_tree(objectset.objects)
+        print_tree(objectset)
 
     if args.outfile:
         with args.outfile.open("wb") as f:
