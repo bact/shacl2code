@@ -8,14 +8,12 @@ from __future__ import annotations
 
 import importlib
 import warnings
-from types import ModuleType as _ModuleType
 from typing import TYPE_CHECKING, TypeVar as _TypeVar
 
 if TYPE_CHECKING:
     from typing import Any as _Any, Callable as _Callable, Dict as _Dict, List as _List
 
-    # Annotation-only (see "from __future__ import annotations" above), so
-    # keeping them out of the runtime namespace avoids shadowing a
+    # Annotation-only; kept out of runtime namespace to avoid shadowing a
     # same-named SHACL class.
 
     from .model import *  # noqa: F401, F403
@@ -52,13 +50,18 @@ def __getattr__(name: str) -> _Any:
     # PEP 562 lazy access: each branch imports only what it needs.
     if name == "__all__":
         # Only "import *" needs this; it must load the model to compute it.
+        # Local import: typeshed's ModuleType stub has a fake __getattr__,
+        # which some stubtest versions flag if ModuleType is a real
+        # module-level name (e.g. mypy 1.19.1 on Python 3.9 CI; not 2.3.1).
+        from types import ModuleType
+
         mod = importlib.import_module(f"{__name__}.model")
         return sorted(
             n
             for n, o in vars(mod).items()
             if not n.startswith("_")
             and n != "TYPE_CHECKING"  # imported flag, not model content
-            and not isinstance(o, (_TypeVar, _ModuleType))
+            and not isinstance(o, (_TypeVar, ModuleType))
             and (
                 getattr(o, "__module__", None) == mod.__name__
                 or getattr(o, "__module__", None) is None  # plain constants
