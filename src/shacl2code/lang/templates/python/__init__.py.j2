@@ -3,13 +3,36 @@
 # {{ disclaimer }}
 #
 # SPDX-License-Identifier: {{ spdx_license }}
+# {%- import "_macros.j2" as pymacros with context %}
 
-from .model import *  # noqa: F401, F403
+# Names resolve lazily (PEP 562), so importing a submodule does not load .model
+
+from importlib import import_module as _import_module
+from typing import Any, List
 
 # fmt: off
 """Format Guard{{ '"' }}{{ '"' }}{{ '"' }}
-{%- if include_main %}
-from .cmd import main  # noqa: F401, I100, I202
-{%- endif %}
+{{- pymacros.package_all(include_main) }}
 {{ '"' }}{{ '"' }}{{ '"' }}Format Guard"""
-# fmt on
+# fmt: on
+
+# Exported by .model only when rdflib is installed
+_OPTIONAL = frozenset({"RDFDecoder", "RDFDeserializer", "RDFEncoder", "RDFSerializer"})
+
+
+def __getattr__(name: str) -> Any:
+    # fmt: off
+    """Format Guard{{ '"' }}{{ '"' }}{{ '"' }}
+{%- if include_main %}
+    if name == "main":
+        return _import_module(".cmd", __name__).main
+{%- endif %}
+    {{ '"' }}{{ '"' }}{{ '"' }}Format Guard"""
+    # fmt: on
+    if name in __all__ or name in _OPTIONAL:
+        return getattr(_import_module(".model", __name__), name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> List[str]:
+    return sorted(set(globals()) | set(__all__))

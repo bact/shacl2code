@@ -103,6 +103,7 @@ class PythonRender(JinjaTemplateRender):
 
     FILES = (
         "__init__.py",
+        "__init__.pyi",
         "model.py",
         "model.pyi",
     )
