@@ -1,0 +1,17 @@
+#
+# {{ disclaimer }}
+#
+# SPDX-License-Identifier: {{ spdx_license }}
+# {%- import "_macros.j2" as pymacros with context %}
+"""Generated stub for the generated Python bindings package."""
+
+from .model import *  # noqa: F401, F403
+
+# fmt: off
+"""Format Guard{{ '"' }}{{ '"' }}{{ '"' }}
+{%- if include_main %}
+from .cmd import main as main  # noqa: E402, I100, I202
+{%- endif %}
+{{- pymacros.package_all(include_main, "  # noqa: F405") }}
+{{ '"' }}{{ '"' }}{{ '"' }}Format Guard"""
+# fmt: on
