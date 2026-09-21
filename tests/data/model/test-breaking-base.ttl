@@ -1,0 +1,60 @@
+# Minimal "v1 shape" counterparts for test-breaking.ttl's negative
+# cross-version Protocol tests. Kept separate from test.ttl (not modified --
+# it's shared by every other language's tests) and from test-breaking.ttl:
+# each class here pairs 1:1 by name with a class of the same name in
+# test-breaking.ttl, which changes exactly one thing about it. See
+# test_toy_breaking_*_rejected in tests/test_cross_version.py, one test per
+# class pair, each with its own script.
+@base <http://example.org/shacl2code-test/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+<http://example.org/shacl2code-test> a owl:Ontology ;
+    rdfs:comment "A test ontology" ;
+    rdfs:label "shacl2code-test" ;
+    owl:versionInfo "1.0.0"
+    .
+
+<breaking-type-class> a sh:NodeShape, owl:Class ;
+    rdfs:comment "v1 shape for the type-change test -- value is a string here" ;
+    sh:property [
+        sh:datatype xsd:string ;
+        sh:path <breaking-type-class/value> ;
+        sh:maxCount 1
+    ]
+    .
+
+<breaking-type-class/value> a rdf:Property ;
+    rdfs:comment "A string property here; test-breaking.ttl changes it to integer" ;
+    rdfs:range xsd:string
+    .
+
+<breaking-removed-class> a sh:NodeShape, owl:Class ;
+    rdfs:comment "v1 shape for the removed-property test -- has value" ;
+    sh:property [
+        sh:datatype xsd:string ;
+        sh:path <breaking-removed-class/value> ;
+        sh:maxCount 1
+    ]
+    .
+
+<breaking-removed-class/value> a rdf:Property ;
+    rdfs:comment "A string property here; test-breaking.ttl removes it entirely" ;
+    rdfs:range xsd:string
+    .
+
+<breaking-cardinality-class> a sh:NodeShape, owl:Class ;
+    rdfs:comment "v1 shape for the cardinality-flip test -- value is a list here" ;
+    sh:property [
+        sh:datatype xsd:string ;
+        sh:path <breaking-cardinality-class/value>
+    ]
+    .
+
+<breaking-cardinality-class/value> a rdf:Property ;
+    rdfs:comment "A string list property here; test-breaking.ttl flips it to scalar" ;
+    rdfs:range xsd:string
+    .

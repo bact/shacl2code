@@ -1,0 +1,51 @@
+# Deliberately BREAKING variants of test-breaking-base.ttl's classes, for
+# negative cross-version Protocol tests. Each class here has the SAME name
+# as its counterpart there (so a "compact-name"/"iri" discriminator alone
+# would accept it), but exactly ONE structural change relative to it -- see
+# each class's rdfs:comment. Each class is used by exactly one test in
+# tests/test_cross_version.py, with its own script, so a failure is
+# attributable to one specific change.
+@base <http://example.org/shacl2code-test/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+<http://example.org/shacl2code-test> a owl:Ontology ;
+    rdfs:comment "A test ontology" ;
+    rdfs:label "shacl2code-test" ;
+    owl:versionInfo "1.0.0"
+    .
+
+<breaking-type-class> a sh:NodeShape, owl:Class ;
+    rdfs:comment "value's type changed string -> integer, vs. test-breaking-base.ttl" ;
+    sh:property [
+        sh:datatype xsd:integer ;
+        sh:path <breaking-type-class/value> ;
+        sh:maxCount 1
+    ]
+    .
+
+<breaking-type-class/value> a rdf:Property ;
+    rdfs:comment "An integer property here; a string in test-breaking-base.ttl" ;
+    rdfs:range xsd:integer
+    .
+
+<breaking-removed-class> a sh:NodeShape, owl:Class ;
+    rdfs:comment "value removed entirely, vs. test-breaking-base.ttl"
+    .
+
+<breaking-cardinality-class> a sh:NodeShape, owl:Class ;
+    rdfs:comment "value's cardinality flipped list -> scalar, vs. test-breaking-base.ttl" ;
+    sh:property [
+        sh:datatype xsd:string ;
+        sh:path <breaking-cardinality-class/value> ;
+        sh:maxCount 1
+    ]
+    .
+
+<breaking-cardinality-class/value> a rdf:Property ;
+    rdfs:comment "A scalar string property here; a list in test-breaking-base.ttl" ;
+    rdfs:range xsd:string
+    .
