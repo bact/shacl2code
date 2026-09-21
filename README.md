@@ -327,6 +327,12 @@ status using the following order of precedence (1 = the highest priority):
     If none of the above are present, the ontology is assumed to be a stable
     release.
 
+### Test data licensing
+
+The `tests/` directory vendors some third-party test fixtures under their
+own licenses, separate from this project's MIT license. See
+[`tests/data/spdx/README.md`](tests/data/spdx/README.md).
+
 [pytest]: https://www.pytest.org
 [pytest-cov]: https://pytest-cov.readthedocs.io/en/latest/
 [semver]: https://semver.org/
