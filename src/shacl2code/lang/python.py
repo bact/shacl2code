@@ -3,9 +3,12 @@
 # SPDX-License-Identifier: MIT
 """Python language binding renderer"""
 
+import ast
 import keyword
 import re
 from pathlib import Path
+
+from jinja2 import TemplateRuntimeError
 
 from .common import JinjaTemplateRender
 from .lang import TEMPLATE_DIR, language
@@ -38,9 +41,8 @@ DATATYPE_PYTHON_TYPES = {
 
 # Names a generated property would collide with; varname() renames it instead.
 #
-# Gap: class names are unguarded. Under a context they compact to short names,
-# so a class compacting to "Property", "Ontology", "SHACLObjectSet", etc.
-# silently shadows it.
+# Class names are not renamed: one landing on a module-level name (e.g.
+# "Property", "Optional") fails generation via check_no_shadowed_names().
 SHACLOBJECT_RESERVED_WORDS = {
     "AUTO_NAMED_INDIVIDUALS",
     "CLASSES",
@@ -93,6 +95,114 @@ def prop_element_pytype(prop, classes):
     if prop.class_id:
         return "Union[str, '" + varname(*classes.get(prop.class_id).clsname) + "']"
     return DATATYPE_PYTHON_TYPES[prop.datatype]
+
+
+def _target_names(target):
+    """Names bound by an assignment target, unpacking tuples/lists."""
+    if isinstance(target, ast.Name):
+        return [target.id]
+    if isinstance(target, ast.Starred):
+        return _target_names(target.value)
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return [n for t in target.elts for n in _target_names(t)]
+    return []
+
+
+def _is_overload(stmt) -> bool:
+    """Whether a def is an @overload stub, which may repeat a name."""
+    for dec in stmt.decorator_list:
+        if isinstance(dec, ast.Name) and dec.id == "overload":
+            return True
+        if isinstance(dec, ast.Attribute) and dec.attr == "overload":
+            return True
+    return False
+
+
+def _scope_bindings(body):
+    """Names a statement list binds, as ({name: lineno}, duplicates).
+
+    Mutually exclusive branches (if/else, try/except) are merged rather than
+    compared, so a name defined in both arms isn't a redefinition.
+    """
+    names: dict = {}
+    dups: list = []
+
+    def add(name, lineno):
+        if name in names:
+            dups.append((name, names[name], lineno))
+        else:
+            names[name] = lineno
+
+    def branches(*bodies):
+        merged: dict = {}
+        for b in bodies:
+            sub_names, sub_dups = _scope_bindings(b)
+            dups.extend(sub_dups)
+            for n, lineno in sub_names.items():
+                merged.setdefault(n, lineno)
+        for n, lineno in merged.items():
+            add(n, lineno)
+
+    for stmt in body:
+        if isinstance(stmt, ast.Import):
+            for a in stmt.names:
+                add(a.asname or a.name.split(".")[0], stmt.lineno)
+        elif isinstance(stmt, ast.ImportFrom):
+            for a in stmt.names:
+                if a.name != "*":
+                    add(a.asname or a.name, stmt.lineno)
+        elif isinstance(stmt, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            if not _is_overload(stmt):
+                add(stmt.name, stmt.lineno)
+        elif isinstance(stmt, ast.Assign):
+            for t in stmt.targets:
+                for n in _target_names(t):
+                    add(n, stmt.lineno)
+        elif isinstance(stmt, ast.AnnAssign):
+            for n in _target_names(stmt.target):
+                add(n, stmt.lineno)
+        elif isinstance(stmt, ast.If):
+            branches(stmt.body, stmt.orelse)
+        elif isinstance(stmt, ast.Try):
+            branches(
+                stmt.body,
+                *[h.body for h in stmt.handlers],
+                stmt.orelse,
+                stmt.finalbody,
+            )
+        elif isinstance(stmt, (ast.For, ast.While, ast.With)):
+            branches(stmt.body)
+
+    return names, dups
+
+
+def check_no_shadowed_names(text: str, filename: str) -> None:
+    """Reject generated Python that binds one top-level name twice.
+
+    A model-derived class or constant landing on a name the module already
+    imports silently rebinds it -- a class named "Optional", for instance,
+    replaces typing.Optional for every annotation after it. Parsing the
+    rendered output catches every such collision for every generated module,
+    with no per-module reserved-word list to maintain.
+    """
+    try:
+        tree = ast.parse(text, filename=filename)
+    except SyntaxError as e:
+        raise TemplateRuntimeError(
+            f"{filename}: generated invalid Python: {e}"
+        ) from None
+
+    _, dups = _scope_bindings(tree.body)
+    if dups:
+        detail = "; ".join(
+            f"{n!r} (line {first}, again on line {second})"
+            for n, first, second in sorted(dups)
+        )
+        raise TemplateRuntimeError(
+            f"{filename}: generated code binds the same top-level name twice: "
+            f"{detail}. A model name most likely collides with an import or "
+            "another class; rename it in the model or context."
+        )
 
 
 @language("python")
@@ -169,6 +279,12 @@ class PythonRender(JinjaTemplateRender):
             "DATATYPE_CLASSES": DATATYPE_CLASSES,
             "DATATYPE_PYTHON_TYPES": DATATYPE_PYTHON_TYPES,
         }
+
+    def validate_render(self, text, name):
+        # Backstop for every generated module: a model name landing on a
+        # name the module already binds would otherwise silently shadow it.
+        if name.endswith((".py.j2", ".pyi.j2")):
+            check_no_shadowed_names(text, name[: -len(".j2")])
 
     def get_additional_render_args(self, model):
         if self.__use_slots == "auto":

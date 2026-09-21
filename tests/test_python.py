@@ -16,6 +16,8 @@ import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from jinja2 import TemplateRuntimeError
+
 import jsonschema
 
 import pyshacl
@@ -24,7 +26,7 @@ import pytest
 
 import rdflib
 
-from shacl2code.lang.python import SHACLOBJECT_RESERVED_WORDS
+from shacl2code.lang.python import SHACLOBJECT_RESERVED_WORDS, check_no_shadowed_names
 
 from testfixtures import jsonvalidation, timetests
 
@@ -2238,6 +2240,127 @@ def test_reserved_words_cover_shaclobject_names(model):
     assert required, "found no class-level names to check"
     missing = sorted(required - SHACLOBJECT_RESERVED_WORDS)
     assert not missing, f"not in SHACLOBJECT_RESERVED_WORDS: {missing}"
+
+
+class TestGeneratedNameCollisions:
+    """
+    A class name landing on a name the generated module already binds must
+    fail generation, not silently shadow it.
+    """
+
+    COLLIDE_TTL = textwrap.dedent("""\
+        @base <http://example.org/nc/> .
+        @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+        @prefix sh: <http://www.w3.org/ns/shacl#> .
+        @prefix owl: <http://www.w3.org/2002/07/owl#> .
+
+        <http://example.org/nc> a owl:Ontology ;
+            rdfs:comment "name collision" ;
+            rdfs:label "nc" ;
+            owl:versionInfo "1.0.0" .
+
+        <first> a sh:NodeShape, owl:Class ; rdfs:comment "collides" .
+        <second> a sh:NodeShape, owl:Class ; rdfs:comment "defined after" .
+        """)
+
+    def _generate(self, tmp_path, class_name):
+        """Generate a two-class model whose first class compacts to class_name."""
+        ttl = tmp_path / "nc.ttl"
+        ttl.write_text(self.COLLIDE_TTL)
+        ctx = tmp_path / "nc-context.json"
+        ctx.write_text(
+            json.dumps(
+                {
+                    "@context": {
+                        "@base": "http://example.org/nc/",
+                        class_name: "http://example.org/nc/first",
+                        "ZzzLater": "http://example.org/nc/second",
+                    }
+                }
+            )
+        )
+        return subprocess.run(
+            [
+                "shacl2code",
+                "generate",
+                "--input",
+                ttl,
+                "--context-url",
+                ctx,
+                "https://example.com/nc.jsonld",
+                "python",
+                "--output",
+                tmp_path / "out",
+            ],
+            encoding="utf-8",
+            capture_output=True,
+        )
+
+    @pytest.mark.parametrize(
+        "class_name",
+        [
+            # Classes the template defines
+            "Property",
+            "Ontology",
+            "SHACLObjectSet",
+            # A name the template imports
+            "Optional",
+        ],
+    )
+    def test_colliding_class_name_is_rejected(self, tmp_path, class_name):
+        r = self._generate(tmp_path, class_name)
+        assert r.returncode != 0
+        assert "model.py" in r.stderr
+        assert "same top-level name twice" in r.stderr
+        assert repr(class_name) in r.stderr
+
+    def test_non_colliding_class_name_is_allowed(self, tmp_path):
+        # Bound only as _TYPE_CHECKING, so a class may use the plain name.
+        r = self._generate(tmp_path, "TYPE_CHECKING")
+        assert r.returncode == 0, r.stderr
+
+
+class TestCheckNoShadowedNames:
+    """Unit tests for the AST backstop, no code generation."""
+
+    def test_accepts_names_bound_once(self):
+        check_no_shadowed_names(
+            "from typing import Optional\nx: Optional[int]\n", "m.py"
+        )
+
+    def test_accepts_same_name_in_exclusive_branches(self):
+        """if/else and try/except arms are alternatives, not redefinitions."""
+        check_no_shadowed_names(
+            "import sys\n"
+            "if sys.version_info >= (3, 10):\n"
+            "    from typing import TypeAlias\n"
+            "else:\n"
+            "    from typing_extensions import TypeAlias\n",
+            "m.py",
+        )
+        check_no_shadowed_names(
+            "try:\n    import ujson as json\nexcept ImportError:\n    import json\n",
+            "m.py",
+        )
+
+    def test_accepts_overloads(self):
+        check_no_shadowed_names(
+            "from typing import overload\n"
+            "@overload\ndef f(x: int) -> int: ...\n"
+            "@overload\ndef f(x: str) -> str: ...\n"
+            "def f(x): return x\n",
+            "m.py",
+        )
+
+    def test_rejects_redefinition(self):
+        with pytest.raises(TemplateRuntimeError, match="same top-level name twice"):
+            check_no_shadowed_names(
+                "from typing import Optional\nclass Optional:\n    pass\n", "m.py"
+            )
+
+    def test_rejects_invalid_python(self):
+        with pytest.raises(TemplateRuntimeError, match="generated invalid Python"):
+            check_no_shadowed_names("class (:\n", "m.py")
 
 
 def test_extensible_properties(model, test_context_url):
