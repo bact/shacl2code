@@ -4,6 +4,7 @@
 """Python language binding renderer"""
 
 import ast
+import builtins
 import keyword
 import re
 from pathlib import Path
@@ -118,13 +119,88 @@ def _is_overload(stmt) -> bool:
     return False
 
 
-def _scope_bindings(body):
+# Non-dunder names the interpreter falls back to when a module doesn't bind
+# them itself -- a module-level rebinding of one it also uses is a real bug.
+_BUILTIN_NAMES = frozenset(n for n in dir(builtins) if not n.startswith("_"))
+
+
+def _used_builtins(tree):
+    """Builtin names the module loads anywhere (even inside a function
+    body), so a later module-level rebinding of one is checked as a dup."""
+    return {
+        node.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name)
+        and isinstance(node.ctx, ast.Load)
+        and node.id in _BUILTIN_NAMES
+    }
+
+
+# Statement kinds with their own scope: a walrus in their BODY doesn't bind
+# at module scope. Their other fields (decorators, argument defaults/
+# annotations, class bases/keywords) still run at module scope when the
+# def/class statement executes, so those are walked, not skipped.
+_WALRUS_SCOPE_DEFS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+
+
+def _reject_module_walrus(tree, filename):
+    """Raise if a walrus assignment appears anywhere at module scope.
+
+    A comprehension/generator expression is NOT a scope boundary here: PEP
+    572 binds its walrus target in the nearest enclosing non-comprehension
+    scope, which -- since a function/lambda/class body stops this walk --
+    is always module scope by the time this walk reaches one.
+
+    _scope_bindings doesn't model the binding a walrus introduces, so this
+    runs once upfront rather than checking each statement kind separately.
+    """
+    where = filename or "<generated>"
+
+    def walk(node):
+        for name, value in ast.iter_fields(node):
+            if isinstance(node, _WALRUS_SCOPE_DEFS) and name == "body":
+                continue
+            for child in value if isinstance(value, list) else [value]:
+                if not isinstance(child, ast.AST):
+                    continue
+                if isinstance(child, ast.NamedExpr):
+                    raise TemplateRuntimeError(
+                        f"{where}: name-collision check does not understand "
+                        f"module-level NamedExpr at line {child.lineno} "
+                        "(walrus assignment); extend _scope_bindings"
+                    )
+                walk(child)
+
+    walk(tree)
+
+
+def _scope_bindings(body, filename=None, prebound=None):
     """Names a statement list binds, as ({name: lineno}, duplicates).
 
+    Only understands the module-level statement kinds the Python templates
+    actually emit: imports, class/function defs, (ann/aug)assignments, a
+    bare expression statement, pass, if, and a try restricted to a plain
+    body/except/else (no ``finally``, no ``except ... as name``). Anything
+    else -- e.g. a `global` statement or a `for`/`while`/`with`/`match` --
+    raises, rather than silently missing a binding it doesn't model. (A
+    module-level walrus is rejected upfront by _reject_module_walrus,
+    before this is called.)
+
     Mutually exclusive branches (if/else, try/except) are merged rather than
-    compared, so a name defined in both arms isn't a redefinition.
+    compared, so a name defined in both arms isn't a redefinition. A try's
+    body and orelse run as one sequential path, and each handler is an
+    alternative to that path.
+
+    A name bound by ``from __future__ import ...`` is not tracked: it's a
+    compiler directive consumed before the module runs (e.g. `annotations`
+    is briefly bound to a `_Feature` object), so a class reusing that name
+    later harmlessly replaces a value nothing else in the module reads.
+
+    prebound seeds the returned scope with pre-existing bindings (pre-bound
+    builtins, with lineno 0 as a "no real line" sentinel); only meaningful
+    on the outermost call, since nested calls merge into the caller's scope.
     """
-    names: dict = {}
+    names: dict = dict(prebound) if prebound else {}
     dups: list = []
 
     def add(name, lineno):
@@ -136,18 +212,30 @@ def _scope_bindings(body):
     def branches(*bodies):
         merged: dict = {}
         for b in bodies:
-            sub_names, sub_dups = _scope_bindings(b)
+            sub_names, sub_dups = _scope_bindings(b, filename)
             dups.extend(sub_dups)
             for n, lineno in sub_names.items():
                 merged.setdefault(n, lineno)
         for n, lineno in merged.items():
             add(n, lineno)
 
+    def unsupported(stmt, detail=None):
+        where = filename or "<generated>"
+        msg = (
+            f"{where}: name-collision check does not understand module-level "
+            f"{type(stmt).__name__} at line {stmt.lineno}"
+        )
+        if detail:
+            msg += f" ({detail})"
+        raise TemplateRuntimeError(msg + "; extend _scope_bindings")
+
     for stmt in body:
         if isinstance(stmt, ast.Import):
             for a in stmt.names:
                 add(a.asname or a.name.split(".")[0], stmt.lineno)
         elif isinstance(stmt, ast.ImportFrom):
+            if stmt.module == "__future__":
+                continue
             for a in stmt.names:
                 if a.name != "*":
                     add(a.asname or a.name, stmt.lineno)
@@ -161,29 +249,34 @@ def _scope_bindings(body):
         elif isinstance(stmt, ast.AnnAssign):
             for n in _target_names(stmt.target):
                 add(n, stmt.lineno)
+        elif isinstance(stmt, (ast.AugAssign, ast.Expr, ast.Pass)):
+            pass  # AugAssign augments an existing name; binds nothing new.
         elif isinstance(stmt, ast.If):
             branches(stmt.body, stmt.orelse)
         elif isinstance(stmt, ast.Try):
-            branches(
-                stmt.body,
-                *[h.body for h in stmt.handlers],
-                stmt.orelse,
-                stmt.finalbody,
-            )
-        elif isinstance(stmt, (ast.For, ast.While, ast.With)):
-            branches(stmt.body)
+            if stmt.finalbody:
+                unsupported(stmt, "try/finally")
+            if any(h.name is not None for h in stmt.handlers):
+                unsupported(stmt, "except ... as name")
+            branches(stmt.body + stmt.orelse, *[h.body for h in stmt.handlers])
+        else:
+            unsupported(stmt)
 
     return names, dups
 
 
-def check_no_shadowed_names(text: str, filename: str) -> None:
+def check_no_shadowed_names(text: str, filename: str, class_iris=None) -> None:
     """Reject generated Python that binds one top-level name twice.
 
     A model-derived class or constant landing on a name the module already
-    imports silently rebinds it -- a class named "Optional", for instance,
-    replaces typing.Optional for every annotation after it. Parsing the
+    imports, or a builtin it uses, silently rebinds it -- a class named
+    "Optional" or "str", for instance, replaces that name for every use
+    after it, including inside function bodies defined earlier. Parsing the
     rendered output catches every such collision for every generated module,
     with no per-module reserved-word list to maintain.
+
+    class_iris, if given, maps a Python name to the source class IRI(s) it
+    was generated from, to name in the error.
     """
     try:
         tree = ast.parse(text, filename=filename)
@@ -192,11 +285,27 @@ def check_no_shadowed_names(text: str, filename: str) -> None:
             f"{filename}: generated invalid Python: {e}"
         ) from None
 
-    _, dups = _scope_bindings(tree.body)
+    _reject_module_walrus(tree, filename)
+
+    prebound = {n: 0 for n in _used_builtins(tree)}
+    _, dups = _scope_bindings(tree.body, filename, prebound=prebound)
     if dups:
+
+        def describe(n, first, second):
+            if first == 0:
+                loc = (
+                    f"{n!r} shadows a builtin used by the generated code "
+                    f"(line {second})"
+                )
+            else:
+                loc = f"{n!r} (line {first}, again on line {second})"
+            iris = class_iris.get(n) if class_iris else None
+            if iris:
+                loc += f" [class: {', '.join(iris)}]"
+            return loc
+
         detail = "; ".join(
-            f"{n!r} (line {first}, again on line {second})"
-            for n, first, second in sorted(dups)
+            describe(n, first, second) for n, first, second in sorted(dups)
         )
         raise TemplateRuntimeError(
             f"{filename}: generated code binds the same top-level name twice: "
@@ -227,6 +336,7 @@ class PythonRender(JinjaTemplateRender):
             self.__version = repr(convert_version_string(args.version))
         else:
             self.__version = ""
+        self.__class_iris = {}
 
     @classmethod
     def get_arguments(cls, parser):
@@ -284,9 +394,15 @@ class PythonRender(JinjaTemplateRender):
         # Backstop for every generated module: a model name landing on a
         # name the module already binds would otherwise silently shadow it.
         if name.endswith((".py.j2", ".pyi.j2")):
-            check_no_shadowed_names(text, name[: -len(".j2")])
+            check_no_shadowed_names(
+                text, name[: -len(".j2")], class_iris=self.__class_iris
+            )
 
     def get_additional_render_args(self, model):
+        self.__class_iris = {}
+        for cls in model.classes:
+            self.__class_iris.setdefault(varname(*cls.clsname), []).append(cls._id)
+
         if self.__use_slots == "auto":
             use_slots = all(len(cls.parent_ids) <= 1 for cls in model.classes)
         elif self.__use_slots == "yes":
