@@ -26,7 +26,11 @@ import pytest
 
 import rdflib
 
-from shacl2code.lang.python import SHACLOBJECT_RESERVED_WORDS, check_no_shadowed_names
+from shacl2code.lang.python import (
+    SHACLOBJECT_RESERVED_WORDS,
+    _extract_all,
+    check_no_shadowed_names,
+)
 
 from testfixtures import jsonvalidation, timetests
 
@@ -2263,7 +2267,9 @@ class TestGeneratedNameCollisions:
         <second> a sh:NodeShape, owl:Class ; rdfs:comment "defined after" .
         """)
 
-    def _generate(self, tmp_path, class_name, second_name="ZzzLater"):
+    def _generate(
+        self, tmp_path, class_name, second_name="ZzzLater", include_main=None
+    ):
         """Generate a two-class model whose first class compacts to
         class_name and second class compacts to second_name."""
         ttl = tmp_path / "nc.ttl"
@@ -2280,22 +2286,20 @@ class TestGeneratedNameCollisions:
                 }
             )
         )
-        return subprocess.run(
-            [
-                "shacl2code",
-                "generate",
-                "--input",
-                ttl,
-                "--context-url",
-                ctx,
-                "https://example.com/nc.jsonld",
-                "python",
-                "--output",
-                tmp_path / "out",
-            ],
-            encoding="utf-8",
-            capture_output=True,
-        )
+        args = [
+            "shacl2code",
+            "generate",
+            "--input",
+            ttl,
+            "--context-url",
+            ctx,
+            "https://example.com/nc.jsonld",
+            "python",
+        ]
+        if include_main is not None:
+            args += ["--include-main", "yes" if include_main else "no"]
+        args += ["--output", tmp_path / "out"]
+        return subprocess.run(args, encoding="utf-8", capture_output=True)
 
     @pytest.mark.parametrize(
         "class_name",
@@ -2340,6 +2344,72 @@ class TestGeneratedNameCollisions:
         # Both source classes are named so the user knows what to rename.
         assert "http://example.org/nc/first" in r.stderr
         assert "http://example.org/nc/second" in r.stderr
+
+    @pytest.mark.parametrize(
+        "class_name,include_main,expected_file",
+        [
+            pytest.param("main", True, "__init__.py", id="main"),
+            # __init__.py never imports the bare name "cmd" (only `main`
+            # from it); this only fails because cmd is pre-bound as a
+            # sibling module.
+            pytest.param("cmd", True, "__init__.py", id="cmd"),
+            pytest.param("model", True, "__init__.py", id="model-with-cmd"),
+            pytest.param("model", False, "__init__.py", id="model-without-cmd"),
+        ],
+    )
+    def test_package_namespace_collision_is_rejected(
+        self, tmp_path, class_name, include_main, expected_file
+    ):
+        """Every sibling module this renderer emits (model, and cmd when
+        --include-main=yes) is bound as a package attribute the moment
+        it's imported by anyone -- not only when __init__.py itself
+        imports it -- so a class exposed under that same name collides."""
+        r = self._generate(tmp_path, class_name, include_main=include_main)
+        assert r.returncode != 0
+        assert expected_file in r.stderr
+        assert "same top-level name twice" in r.stderr
+        assert repr(class_name) in r.stderr
+
+
+class TestExtractAll:
+    """Unit tests for the __all__ extraction used to expand star-imports."""
+
+    def test_simple_list(self):
+        assert _extract_all("__all__ = ['A', 'B']\n", "m.py") == ["A", "B"]
+
+    def test_augmented_assign_appends(self):
+        assert _extract_all("__all__ = ['A']\n__all__ += ['B']\n", "m.py") == ["A", "B"]
+
+    def test_inside_top_level_try(self):
+        src = (
+            "__all__ = ['A']\n"
+            "try:\n    __all__ += ['B']\nexcept ImportError:\n    pass\n"
+        )
+        assert _extract_all(src, "m.py") == ["A", "B"]
+
+    def test_none_when_never_assigned(self):
+        assert _extract_all("x = 1\n", "m.py") is None
+
+    def test_raises_on_non_literal(self):
+        with pytest.raises(TemplateRuntimeError, match="literal list"):
+            _extract_all("__all__ = compute()\n", "m.py")
+
+    def test_raises_on_non_string_entry(self):
+        with pytest.raises(TemplateRuntimeError, match="literal list"):
+            _extract_all("__all__ = ['A', 1]\n", "m.py")
+
+    @pytest.mark.parametrize(
+        "label,src",
+        [
+            ("if", "if True:\n    __all__ = ['A']\n"),
+            ("nested-class", "class Foo:\n    __all__ = ['A']\n"),
+        ],
+    )
+    def test_rejects_all_assigned_in_unsupported_place(self, label, src):
+        """Only module-level and top-level-try assignments are collected;
+        __all__ touched anywhere else is fail-closed, not silently ignored."""
+        with pytest.raises(TemplateRuntimeError, match="unsupported __all__"):
+            _extract_all(src, "m.py")
 
 
 class TestCheckNoShadowedNames:
@@ -2473,6 +2543,96 @@ class TestCheckNoShadowedNames:
             check_no_shadowed_names(
                 "class y:\n    pass\n\n\n_ = [y := i for i in range(3)]\n", "m.py"
             )
+
+    def test_star_import_expansion_flags_clash(self):
+        with pytest.raises(TemplateRuntimeError, match="same top-level name twice"):
+            check_no_shadowed_names(
+                "from .model import *\nfrom .cmd import main\n",
+                "__init__.py",
+                star_names={"model": ["main"]},
+            )
+
+    def test_star_import_expansion_allows_disjoint_names(self):
+        check_no_shadowed_names(
+            "from .model import *\nfrom .cmd import main\n",
+            "__init__.py",
+            star_names={"model": ["Foo", "Bar"]},
+        )
+
+    def test_star_import_without_star_names_raises(self):
+        """No lenient path: omitting star_names still fails closed."""
+        with pytest.raises(TemplateRuntimeError, match="exports are unknown"):
+            check_no_shadowed_names("from .model import *\n", "m.py")
+
+    def test_star_import_from_unrecorded_module_raises(self):
+        with pytest.raises(TemplateRuntimeError, match="exports are unknown"):
+            check_no_shadowed_names(
+                "from .cmd import *\n", "__init__.py", star_names={"model": ["Foo"]}
+            )
+
+    def test_package_init_prebinds_submodule_names(self):
+        """Every name in submodules is bound in a package's __init__.py
+        regardless of whether __init__.py itself imports it -- Python sets
+        each as an attribute of the package the moment anything imports
+        it, e.g. `import pkg.protocols` elsewhere in the codebase."""
+        with pytest.raises(TemplateRuntimeError, match="same top-level name twice"):
+            check_no_shadowed_names(
+                "class protocols:\n    pass\n",
+                "__init__.py",
+                package_init=True,
+                submodules={"protocols"},
+            )
+
+    @pytest.mark.parametrize("name", ["model", "cmd", "__main__"])
+    def test_package_init_prebinds_each_generated_submodule(self, name):
+        """model/cmd/__main__ (what --include-main=yes actually emits) are
+        each individually checked, not just the ones __init__.py happens
+        to import from by name."""
+        with pytest.raises(TemplateRuntimeError, match="same top-level name twice"):
+            check_no_shadowed_names(
+                f"class {name}:\n    pass\n",
+                "__init__.py",
+                package_init=True,
+                submodules={"model", "cmd", "__main__"},
+            )
+
+    def test_submodule_prebinding_only_applies_to_package_init(self):
+        """The same submodules set has no effect outside __init__.py (it
+        isn't a real collision there)."""
+        check_no_shadowed_names(
+            "class protocols:\n    pass\n",
+            "cmd.py",
+            package_init=False,
+            submodules={"protocols"},
+        )
+
+    def test_submodule_name_not_bound_without_submodules_param(self):
+        """Binding a sibling module's name is driven solely by the explicit
+        submodules param now, not by __init__.py merely importing from it
+        -- one mechanism, not two answering the same question."""
+        check_no_shadowed_names(
+            "from .model import *\n",
+            "__init__.py",
+            star_names={"model": ["Foo"]},
+            package_init=True,
+        )
+
+    def test_package_init_rejects_lazy_getattr(self):
+        """A module-level `def __getattr__` in __init__.py means lazy
+        attribute access this checker doesn't model; reject explicitly
+        rather than silently missing whatever it exposes."""
+        with pytest.raises(TemplateRuntimeError, match="lazy __getattr__"):
+            check_no_shadowed_names(
+                "def __getattr__(name):\n    pass\n",
+                "__init__.py",
+                package_init=True,
+            )
+
+    def test_getattr_outside_package_init_is_unaffected(self):
+        """The same def is an ordinary function anywhere else."""
+        check_no_shadowed_names(
+            "def __getattr__(name):\n    pass\n", "cmd.py", package_init=False
+        )
 
 
 def test_extensible_properties(model, test_context_url):

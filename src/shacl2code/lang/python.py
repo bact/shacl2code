@@ -174,7 +174,9 @@ def _reject_module_walrus(tree, filename):
     walk(tree)
 
 
-def _scope_bindings(body, filename=None, prebound=None):
+def _scope_bindings(
+    body, filename=None, prebound=None, star_names=None, package_init=False
+):
     """Names a statement list binds, as ({name: lineno}, duplicates).
 
     Only understands the module-level statement kinds the Python templates
@@ -196,9 +198,21 @@ def _scope_bindings(body, filename=None, prebound=None):
     is briefly bound to a `_Feature` object), so a class reusing that name
     later harmlessly replaces a value nothing else in the module reads.
 
-    prebound seeds the returned scope with pre-existing bindings (pre-bound
-    builtins, with lineno 0 as a "no real line" sentinel); only meaningful
-    on the outermost call, since nested calls merge into the caller's scope.
+    star_names maps a relative import's module name (as in ``from .foo
+    import *``, always level 1) to the names it exports; always
+    fail-closed, raising if the target isn't a key in star_names (which
+    itself may be None).
+
+    package_init is True when checking a package's own __init__.py, where a
+    module-level ``def __getattr__`` raises (lazy attribute access isn't
+    modeled) and prebound is expected to include the package's sibling
+    module names (see check_no_shadowed_names).
+
+    prebound seeds the returned scope with pre-existing bindings, keyed by
+    a sentinel lineno (0: a used builtin; -1: a sibling package module) that
+    describe() in check_no_shadowed_names turns into a clearer message; only
+    meaningful on the outermost call, since nested calls merge into the
+    caller's scope.
     """
     names: dict = dict(prebound) if prebound else {}
     dups: list = []
@@ -212,7 +226,9 @@ def _scope_bindings(body, filename=None, prebound=None):
     def branches(*bodies):
         merged: dict = {}
         for b in bodies:
-            sub_names, sub_dups = _scope_bindings(b, filename)
+            sub_names, sub_dups = _scope_bindings(
+                b, filename, star_names=star_names, package_init=package_init
+            )
             dups.extend(sub_dups)
             for n, lineno in sub_names.items():
                 merged.setdefault(n, lineno)
@@ -237,9 +253,33 @@ def _scope_bindings(body, filename=None, prebound=None):
             if stmt.module == "__future__":
                 continue
             for a in stmt.names:
-                if a.name != "*":
+                if a.name == "*":
+                    exported = (
+                        (star_names or {}).get(stmt.module) if stmt.level == 1 else None
+                    )
+                    if exported is None:
+                        where = filename or "<generated>"
+                        raise TemplateRuntimeError(
+                            f"{where}: line {stmt.lineno}: `from "
+                            f"{'.' * stmt.level}{stmt.module or ''} import *` "
+                            "cannot be checked -- target module's exports "
+                            "are unknown"
+                        )
+                    for n in exported:
+                        add(n, stmt.lineno)
+                else:
                     add(a.asname or a.name, stmt.lineno)
         elif isinstance(stmt, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            if (
+                package_init
+                and isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and stmt.name == "__getattr__"
+            ):
+                where = filename or "<generated>"
+                raise TemplateRuntimeError(
+                    f"{where}: line {stmt.lineno}: lazy __getattr__ in "
+                    "__init__ is not supported by the collision check yet"
+                )
             if not _is_overload(stmt):
                 add(stmt.name, stmt.lineno)
         elif isinstance(stmt, ast.Assign):
@@ -265,16 +305,81 @@ def _scope_bindings(body, filename=None, prebound=None):
     return names, dups
 
 
-def check_no_shadowed_names(text: str, filename: str, class_iris=None) -> None:
+def _extract_all(text: str, filename: str):
+    """Names a module exports via ``__all__ = [...]`` / ``__all__ += [...]``
+    at module level or in the body of a module-level try. Fail-closed: if
+    __all__ is touched anywhere else this scan doesn't collect (e.g. inside
+    an ``if`` or a class body), or assigned a non-literal or a non-string
+    entry, raises. None if __all__ is never assigned.
+    """
+    tree = ast.parse(text, filename=filename)
+    names = None
+    collected = 0
+
+    def collect(node):
+        nonlocal names, collected
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target, op = node.targets[0], "="
+        elif isinstance(node, ast.AugAssign):
+            target, op = node.target, "+="
+        else:
+            return
+        if not (isinstance(target, ast.Name) and target.id == "__all__"):
+            return
+
+        valid = isinstance(node.value, (ast.List, ast.Tuple)) and all(
+            isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+            for elt in node.value.elts
+        )
+        if not valid:
+            raise TemplateRuntimeError(
+                f"{filename}: line {node.lineno}: __all__ {op} ... must be "
+                "a literal list/tuple of strings"
+            )
+
+        entries = [elt.value for elt in node.value.elts]
+        names = entries if op == "=" else (names or []) + entries
+        collected += 1
+
+    for node in tree.body:
+        collect(node)
+        if isinstance(node, ast.Try):
+            for sub in node.body:
+                collect(sub)
+
+    total = sum(
+        1
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Name)
+        and n.id == "__all__"
+        and isinstance(n.ctx, ast.Store)
+    )
+    if total != collected:
+        raise TemplateRuntimeError(f"{filename}: unsupported __all__ construction")
+
+    return names
+
+
+def check_no_shadowed_names(
+    text: str,
+    filename: str,
+    star_names=None,
+    package_init=False,
+    class_iris=None,
+    submodules=None,
+) -> None:
     """Reject generated Python that binds one top-level name twice.
 
     A model-derived class or constant landing on a name the module already
     imports, or a builtin it uses, silently rebinds it -- a class named
     "Optional" or "str", for instance, replaces that name for every use
-    after it, including inside function bodies defined earlier. Parsing the
-    rendered output catches every such collision for every generated module,
-    with no per-module reserved-word list to maintain.
+    after it, including inside function bodies defined earlier.
 
+    star_names and package_init are as in _scope_bindings. submodules, used
+    only when package_init, is the package's sibling module base names
+    (e.g. {"model", "cmd"}): Python sets each as an attribute of the
+    package on import regardless of whether __init__.py itself imports it,
+    so all of them are prebound rather than only ones __init__.py imports.
     class_iris, if given, maps a Python name to the source class IRI(s) it
     was generated from, to name in the error.
     """
@@ -288,13 +393,29 @@ def check_no_shadowed_names(text: str, filename: str, class_iris=None) -> None:
     _reject_module_walrus(tree, filename)
 
     prebound = {n: 0 for n in _used_builtins(tree)}
-    _, dups = _scope_bindings(tree.body, filename, prebound=prebound)
+    if package_init:
+        for n in submodules or ():
+            prebound.setdefault(n, -1)
+
+    _, dups = _scope_bindings(
+        tree.body,
+        filename,
+        prebound=prebound,
+        star_names=star_names,
+        package_init=package_init,
+    )
     if dups:
 
         def describe(n, first, second):
             if first == 0:
                 loc = (
                     f"{n!r} shadows a builtin used by the generated code "
+                    f"(line {second})"
+                )
+            elif first == -1:
+                loc = (
+                    f"{n!r} shadows this package's own {n!r} submodule, "
+                    f"which Python binds as a package attribute on import "
                     f"(line {second})"
                 )
             else:
@@ -320,10 +441,12 @@ class PythonRender(JinjaTemplateRender):
 
     HELP = "Python Language Bindings"
 
+    # model.py/model.pyi must render before __init__.py: validate_render
+    # records their __all__ to expand __init__.py's `from .model import *`.
     FILES = (
-        "__init__.py",
         "model.py",
         "model.pyi",
+        "__init__.py",
     )
 
     def __init__(self, args):
@@ -336,7 +459,17 @@ class PythonRender(JinjaTemplateRender):
             self.__version = repr(convert_version_string(args.version))
         else:
             self.__version = ""
+        # module stem ("model") -> names in its rendered __all__, for
+        # expanding star-imports; populated as each .py file is validated.
+        self.__module_all = {}
         self.__class_iris = {}
+        # Sibling module base names this renderer emits (all of FILES but
+        # __init__.py itself, plus cmd/__main__ when include-main): Python
+        # binds each as a package attribute on import, whether or not
+        # __init__.py itself imports it.
+        self.__submodules = {Path(f).stem for f in self.FILES if f != "__init__.py"}
+        if self.__include_main:
+            self.__submodules |= {"cmd", "__main__"}
 
     @classmethod
     def get_arguments(cls, parser):
@@ -393,12 +526,27 @@ class PythonRender(JinjaTemplateRender):
     def validate_render(self, text, name):
         # Backstop for every generated module: a model name landing on a
         # name the module already binds would otherwise silently shadow it.
-        if name.endswith((".py.j2", ".pyi.j2")):
-            check_no_shadowed_names(
-                text, name[: -len(".j2")], class_iris=self.__class_iris
-            )
+        if not name.endswith((".py.j2", ".pyi.j2")):
+            return
+
+        filename = name[: -len(".j2")]
+        check_no_shadowed_names(
+            text,
+            filename,
+            star_names=self.__module_all,
+            package_init=(name == "__init__.py.j2"),
+            class_iris=self.__class_iris,
+            submodules=self.__submodules,
+        )
+
+        # Record model.py's __all__ so a later `from .model import *`
+        # (in __init__.py) can be expanded and checked too.
+        if name.endswith(".py.j2"):
+            stem = filename[: -len(".py")]
+            self.__module_all[stem] = _extract_all(text, filename)
 
     def get_additional_render_args(self, model):
+        self.__module_all = {}
         self.__class_iris = {}
         for cls in model.classes:
             self.__class_iris.setdefault(varname(*cls.clsname), []).append(cls._id)
