@@ -98,6 +98,31 @@ def prop_element_pytype(prop, classes):
     return DATATYPE_PYTHON_TYPES[prop.datatype]
 
 
+def get_all_parent_ids(cls, classes):
+    """Get all ancestor class IDs."""
+    result = set()
+    for pid in cls.parent_ids:
+        result.add(pid)
+        parent = classes.get(pid)
+        result |= get_all_parent_ids(parent, classes)
+    return result
+
+
+def is_effectively_extensible(cls, classes):
+    """Check if a class or any of its ancestors is extensible.
+
+    The runtime __init__ is always inherited (classes never define their
+    own), so a subclass of an extensible class accepts ``typ`` even when its
+    own ``is_extensible`` flag is unset.
+    """
+    if cls.is_extensible:
+        return True
+    for pid in get_all_parent_ids(cls, classes):
+        if classes.get(pid).is_extensible:
+            return True
+    return False
+
+
 def _target_names(target):
     """Names bound by an assignment target, unpacking tuples/lists."""
     if isinstance(target, ast.Name):
@@ -519,6 +544,7 @@ class PythonRender(JinjaTemplateRender):
         return {
             "varname": varname,
             "prop_element_pytype": prop_element_pytype,
+            "is_effectively_extensible": is_effectively_extensible,
             "DATATYPE_CLASSES": DATATYPE_CLASSES,
             "DATATYPE_PYTHON_TYPES": DATATYPE_PYTHON_TYPES,
         }
