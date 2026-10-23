@@ -405,9 +405,15 @@ class Encoder(ABC):
     def write_iri_ref(self, v: str, compact: Optional[str] = None) -> None: ...
     def write_typed_literal(
         self,
-        v: Union[str, int, float, bool],
+        v: str,
         datatype: str,
         compact_datatype: Optional[str] = None,
+    ) -> None: ...
+    def write_lang_string(
+        self,
+        v: str,
+        language: str,
+        direction: Optional[str] = None,
     ) -> None: ...
     def write_object(
         self,
@@ -512,8 +518,17 @@ class IRIRef:
 
 @dataclass(frozen=True)
 class TypedLiteral:
-    value: Union[str, int, float, bool]
+    value: str
     datatype: str
+
+    def __post_init__(self) -> None: ...
+
+
+@dataclass(frozen=True)
+class LangString:
+    value: str
+    language: str
+    direction: Optional[str] = None
 
 
 class SHACLExtensibleObject(SHACLObject):

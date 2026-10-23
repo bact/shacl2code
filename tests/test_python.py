@@ -2263,22 +2263,484 @@ def test_extensible_value_objects(model, test_context_url, tmp_path):
     )
 
 
-def test_extensible_value_objects_invalid(model, test_context_url):
-    PREFIX = "http://example.org/shacl2code-test/"
+EXT_PREFIX = "http://example.org/shacl2code-test/"
+XSD = "http://www.w3.org/2001/XMLSchema#"
+RDF_JSON = "http://www.w3.org/1999/02/22-rdf-syntax-ns#JSON"
 
-    for value in (
-        {"@id": 1},
-        {"@value": "1", "@type": 1},
+
+def ext_doc(context, **props):
+    """Build a JSON-LD document with one extensible object"""
+    d = {
+        "@context": context,
+        "@type": EXT_PREFIX + "test-extensible",
+        "@id": EXT_PREFIX + "e",
+        "extensible-class/required": "required",
+    }
+    d.update(props)
+    return d
+
+
+def ext_value(model, data):
+    """Deserialize a JSON-LD document and return the extensible object"""
+    objset = model.SHACLObjectSet()
+    model.JSONLDDeserializer().deserialize_data(data, objset)
+    e = objset.find_by_id(EXT_PREFIX + "e")
+    assert isinstance(e, model.extensible_class)
+    return objset, e
+
+
+def strict_json_loads(s):
+    def reject(c):
+        raise ValueError(f"Invalid JSON constant {c}")
+
+    return json.loads(s, parse_constant=reject)
+
+
+def write_inline(model, objset, tmp_path):
+    outfile = tmp_path / "out.json"
+    with outfile.open("wb") as f:
+        model.JSONLDInlineSerializer().write(objset, f)
+    return outfile.read_text()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param({"@id": 1}, id="non-string @id"),
+        pytest.param({"@value": "1", "@type": 1}, id="non-string @type"),
+        pytest.param({"@value": [1], "@type": XSD + "decimal"}, id="list @value"),
+        pytest.param({"@value": 1, "@language": "en"}, id="non-string lang value"),
+        pytest.param({"@value": "a", "@language": 1}, id="non-string language"),
+        pytest.param(
+            {"@value": "a", "@type": XSD + "string", "@language": "en"},
+            id="@type and @language",
+        ),
+        pytest.param(
+            {"@value": "a", "@language": "en", "@direction": "up"},
+            id="bad @direction",
+        ),
+    ],
+)
+def test_extensible_value_objects_invalid(model, test_context_url, value):
+    with pytest.raises(model.DecodeError):
+        ext_value(model, ext_doc(test_context_url, **{EXT_PREFIX + "prop": value}))
+
+
+@pytest.mark.parametrize(
+    "value,match",
+    [
+        pytest.param({"@list": [1, 2]}, "@list", id="list object"),
+        pytest.param({"@set": [1, 2]}, "@set", id="set object"),
+        pytest.param(
+            {"@id": EXT_PREFIX + "x", EXT_PREFIX + "p": "v"},
+            "node object",
+            id="embedded node object",
+        ),
+        pytest.param(
+            {"@value": "a", "@direction": "ltr"}, "@direction", id="direction only"
+        ),
+    ],
+)
+def test_extensible_value_objects_unsupported(model, test_context_url, value, match):
+    # Unsupported JSON-LD forms can be read, but give a clear error naming
+    # the form when written
+    objset, e = ext_value(
+        model, ext_doc(test_context_url, **{EXT_PREFIX + "prop": value})
+    )
+    with pytest.raises(model.EncodeError, match=match):
+        model.JSONLDSerializer().serialize_data(objset)
+
+
+def test_extensible_value_objects_rdf_roundtrip(model, test_context_url):
+    # JSON-LD -> objects -> RDF -> objects -> JSON-LD must not lose data
+    DATA = ext_doc(
+        test_context_url,
+        **{
+            EXT_PREFIX + "iri-prop": {"@id": EXT_PREFIX + "iri-value"},
+            EXT_PREFIX + "bnode-prop": {"@id": "_:blank"},
+            EXT_PREFIX + "decimal-prop": {"@value": "0.350", "@type": XSD + "decimal"},
+            EXT_PREFIX + "double-prop": 0.35,
+            EXT_PREFIX + "integral-double-prop": 1.0,
+            EXT_PREFIX + "nan-prop": float("nan"),
+            EXT_PREFIX + "int-prop": 1,
+            EXT_PREFIX + "bool-prop": True,
+            EXT_PREFIX + "string-prop": "1.10",
+            EXT_PREFIX + "lang-prop": {"@value": "chat", "@language": "fr"},
+            EXT_PREFIX
+            + "json-prop": {"@value": {"b": [1, 2], "a": None}, "@type": "@json"},
+            EXT_PREFIX
+            + "multi-iri-prop": [
+                {"@id": EXT_PREFIX + "iri-value"},
+                # Reference to an object that is itself in the graph
+                {"@id": EXT_PREFIX + "e"},
+            ],
+        },
+    )
+
+    objset, e = ext_value(model, DATA)
+    expect = model.JSONLDSerializer().serialize_data(objset)
+
+    g = rdflib.Graph()
+    model.RDFSerializer().write(objset, g)
+
+    subject = rdflib.URIRef(EXT_PREFIX + "e")
+    assert isinstance(
+        g.value(subject, rdflib.URIRef(EXT_PREFIX + "bnode-prop")), rdflib.BNode
+    )
+    assert g.value(subject, rdflib.URIRef(EXT_PREFIX + "nan-prop")) == rdflib.Literal(
+        "NaN", datatype=rdflib.XSD.double, normalize=False
+    )
+    assert g.value(subject, rdflib.URIRef(EXT_PREFIX + "lang-prop")) == rdflib.Literal(
+        "chat", lang="fr"
+    )
+
+    objset2 = model.SHACLObjectSet()
+    model.RDFDeserializer().read(g, objset2)
+    e2 = objset2.find_by_id(EXT_PREFIX + "e")
+    assert e2[EXT_PREFIX + "iri-prop"] == model.IRIRef(EXT_PREFIX + "iri-value")
+    assert e2[EXT_PREFIX + "bnode-prop"] == model.IRIRef("_:blank")
+    assert e2[EXT_PREFIX + "decimal-prop"] == model.TypedLiteral(
+        "0.350", XSD + "decimal"
+    )
+    assert e2[EXT_PREFIX + "double-prop"] == 0.35
+    assert isinstance(e2[EXT_PREFIX + "integral-double-prop"], float)
+    assert e2[EXT_PREFIX + "int-prop"] == 1
+    assert e2[EXT_PREFIX + "bool-prop"] is True
+    assert e2[EXT_PREFIX + "lang-prop"] == model.LangString("chat", "fr")
+
+    actual = model.JSONLDSerializer().serialize_data(objset2)
+
+    # RDF does not preserve the order of multiple values
+    for d in (expect, actual):
+        d[EXT_PREFIX + "multi-iri-prop"].sort(key=lambda v: v["@id"])
+
+    assert actual == expect
+
+
+@pytest.mark.parametrize(
+    "value,lexical",
+    [
+        (float("nan"), "NaN"),
+        (float("inf"), "INF"),
+        (float("-inf"), "-INF"),
+    ],
+)
+def test_extensible_non_finite_float(model, test_context_url, tmp_path, value, lexical):
+    e = model.extensible_class(extensible_class_required="required")
+    e[EXT_PREFIX + "prop"] = value
+    objset = model.SHACLObjectSet()
+    objset.add(e)
+
+    expect = [{"@value": lexical, "@type": XSD + "double"}]
+
+    data = model.JSONLDSerializer().serialize_data(objset)
+    assert data[EXT_PREFIX + "prop"] == expect
+    # Must be valid (RFC 8259) JSON
+    strict_json_loads(json.dumps(data, allow_nan=False))
+
+    text = write_inline(model, objset, tmp_path)
+    assert strict_json_loads(text)["@graph"][0][EXT_PREFIX + "prop"] == expect
+
+    g = rdflib.Graph()
+    model.RDFSerializer().write(objset, g)
+    (o,) = g.objects(None, rdflib.URIRef(EXT_PREFIX + "prop"))
+    assert str(o) == lexical
+    assert o.datatype == rdflib.XSD.double
+
+    # Read back as a float
+    data["@id"] = EXT_PREFIX + "e"
+    _, e2 = ext_value(model, data)
+    (v,) = e2[EXT_PREFIX + "prop"]
+    assert isinstance(v, float)
+    assert repr(v) == repr(value)
+
+
+def test_extensible_integral_float(model, test_context_url, tmp_path):
+    # A float without a fractional part must not be written as a plain JSON
+    # number, which JSON-LD reads as xsd:integer
+    e = model.extensible_class(extensible_class_required="required")
+    e[EXT_PREFIX + "prop"] = 1.0
+    objset = model.SHACLObjectSet()
+    objset.add(e)
+
+    expect = [{"@value": 1.0, "@type": XSD + "double"}]
+    data = model.JSONLDSerializer().serialize_data(objset)
+    assert data[EXT_PREFIX + "prop"] == expect
+    assert (
+        strict_json_loads(write_inline(model, objset, tmp_path))["@graph"][0][
+            EXT_PREFIX + "prop"
+        ]
+        == expect
+    )
+
+    for v in (
+        {"@value": 1, "@type": XSD + "double"},
+        {"@value": 1.0, "@type": XSD + "double"},
+        {"@value": "1E0", "@type": XSD + "double"},
     ):
-        with pytest.raises(model.DecodeError):
-            model.JSONLDDeserializer().deserialize_data(
-                {
-                    "@context": test_context_url,
-                    "@type": PREFIX + "test-extensible",
-                    PREFIX + "prop": value,
-                },
-                model.SHACLObjectSet(),
-            )
+        _, e2 = ext_value(model, ext_doc(test_context_url, **{EXT_PREFIX + "prop": v}))
+        assert e2[EXT_PREFIX + "prop"] == 1.0
+        assert isinstance(e2[EXT_PREFIX + "prop"], float)
+
+
+def test_extensible_iri_context(model, test_context_url):
+    # Node reference IRIs are document-relative, so are never expanded or
+    # compacted with a whole term, only with prefixes ending in a gen-delim
+    CONTEXT = [
+        test_context_url,
+        {"foo": "https://ex.org/ns/foo", "ex": "https://ex.org/ns/"},
+    ]
+    DATA = ext_doc(
+        CONTEXT,
+        **{
+            EXT_PREFIX + "term-id": {"@id": "foo"},
+            EXT_PREFIX + "prefix-id": {"@id": "ex:bar"},
+            EXT_PREFIX + "non-prefix-id": {"@id": "foo:bar"},
+            EXT_PREFIX + "absolute-id": {"@id": "https://ex.org/ns/foo"},
+            EXT_PREFIX + "term-type": {"@value": "x", "@type": "foo"},
+            EXT_PREFIX + "prefix-type": {"@value": "x", "@type": "ex:bar"},
+            EXT_PREFIX + "non-prefix-type": {"@value": "x", "@type": "foo:bar"},
+        },
+    )
+
+    objset, e = ext_value(model, DATA)
+    assert e[EXT_PREFIX + "term-id"] == model.IRIRef("foo")
+    assert e[EXT_PREFIX + "prefix-id"] == model.IRIRef("https://ex.org/ns/bar")
+    assert e[EXT_PREFIX + "non-prefix-id"] == model.IRIRef("foo:bar")
+    assert e[EXT_PREFIX + "absolute-id"] == model.IRIRef("https://ex.org/ns/foo")
+    assert e[EXT_PREFIX + "term-type"] == model.TypedLiteral(
+        "x", "https://ex.org/ns/foo"
+    )
+    assert e[EXT_PREFIX + "prefix-type"] == model.TypedLiteral(
+        "x", "https://ex.org/ns/bar"
+    )
+    assert e[EXT_PREFIX + "non-prefix-type"] == model.TypedLiteral("x", "foo:bar")
+
+    data = model.JSONLDSerializer().serialize_data(objset)
+    assert data[EXT_PREFIX + "term-id"] == [{"@id": "foo"}]
+    assert data[EXT_PREFIX + "prefix-id"] == [{"@id": "ex:bar"}]
+    assert data[EXT_PREFIX + "non-prefix-id"] == [{"@id": "foo:bar"}]
+    # Never compacted to the "foo" term
+    assert data[EXT_PREFIX + "absolute-id"] == [{"@id": "ex:foo"}]
+    assert data[EXT_PREFIX + "term-type"] == [{"@value": "x", "@type": "foo"}]
+    assert data[EXT_PREFIX + "prefix-type"] == [{"@value": "x", "@type": "ex:bar"}]
+    assert data[EXT_PREFIX + "non-prefix-type"] == [{"@value": "x", "@type": "foo:bar"}]
+
+
+def test_extensible_json_and_null_values(model, test_context_url, tmp_path):
+    DATA = ext_doc(
+        test_context_url,
+        **{
+            EXT_PREFIX
+            + "json-prop": {"@value": {"b": 1, "a": [True, None]}, "@type": "@json"},
+            EXT_PREFIX + "json-null-prop": {"@value": None, "@type": "@json"},
+            EXT_PREFIX + "null-prop": {"@value": None, "@type": XSD + "decimal"},
+            EXT_PREFIX
+            + "null-list-prop": [
+                {"@value": None},
+                "a",
+                {"@value": None, "@language": "en"},
+            ],
+        },
+    )
+
+    objset, e = ext_value(model, DATA)
+    assert e[EXT_PREFIX + "json-prop"] == model.TypedLiteral(
+        '{"a":[true,null],"b":1}', RDF_JSON
+    )
+    assert e[EXT_PREFIX + "json-null-prop"] == model.TypedLiteral("null", RDF_JSON)
+    # A null @value is the same as no value
+    with pytest.raises(KeyError):
+        e[EXT_PREFIX + "null-prop"]
+    assert e[EXT_PREFIX + "null-list-prop"] == ["a"]
+
+    expect = {
+        EXT_PREFIX
+        + "json-prop": [{"@value": {"b": 1, "a": [True, None]}, "@type": "@json"}],
+        EXT_PREFIX + "json-null-prop": [{"@value": None, "@type": "@json"}],
+        EXT_PREFIX + "null-list-prop": ["a"],
+    }
+
+    data = model.JSONLDSerializer().serialize_data(objset)
+    for k, v in expect.items():
+        assert data[k] == v
+    assert EXT_PREFIX + "null-prop" not in data
+
+    inline = strict_json_loads(write_inline(model, objset, tmp_path))["@graph"][0]
+    for k, v in expect.items():
+        assert inline[k] == v
+
+
+def test_extensible_value_object_keywords(model, test_context_url):
+    DATA = ext_doc(
+        test_context_url,
+        **{
+            EXT_PREFIX + "value-only": {"@value": "a"},
+            EXT_PREFIX + "value-index": {"@value": 2, "@index": "idx"},
+            EXT_PREFIX
+            + "typed-index": {
+                "@value": "1.0",
+                "@type": XSD + "decimal",
+                "@index": "idx",
+            },
+            EXT_PREFIX + "lang": {"@value": "chat", "@language": "fr"},
+            EXT_PREFIX
+            + "lang-dir": {
+                "@value": "مرحبا",
+                "@language": "ar",
+                "@direction": "rtl",
+            },
+        },
+    )
+
+    objset, e = ext_value(model, DATA)
+    assert e[EXT_PREFIX + "value-only"] == "a"
+    assert e[EXT_PREFIX + "value-index"] == 2
+    assert e[EXT_PREFIX + "typed-index"] == model.TypedLiteral("1.0", XSD + "decimal")
+    assert e[EXT_PREFIX + "lang"] == model.LangString("chat", "fr")
+    assert e[EXT_PREFIX + "lang-dir"] == model.LangString("مرحبا", "ar", "rtl")
+
+    data = model.JSONLDSerializer().serialize_data(objset)
+    assert data[EXT_PREFIX + "lang"] == [{"@value": "chat", "@language": "fr"}]
+    assert data[EXT_PREFIX + "lang-dir"] == [
+        {"@value": "مرحبا", "@language": "ar", "@direction": "rtl"}
+    ]
+
+    # RDF has no base direction; it is dropped as JSON-LD toRdf does by
+    # default
+    g = rdflib.Graph()
+    model.RDFSerializer().write(objset, g)
+    assert g.value(
+        rdflib.URIRef(EXT_PREFIX + "e"), rdflib.URIRef(EXT_PREFIX + "lang-dir")
+    ) == rdflib.Literal("مرحبا", lang="ar")
+
+
+def test_typed_literal_lexical_form(model):
+    # TypedLiteral holds the lexical form, so equality is RDF term equality
+    assert model.TypedLiteral("1.0", XSD + "decimal") != model.TypedLiteral(
+        "1.00", XSD + "decimal"
+    )
+    with pytest.raises(TypeError):
+        model.TypedLiteral(1, XSD + "decimal")
+
+
+def test_encoder_subclass_defaults(model):
+    # Encoder subclasses written before value objects existed must still be
+    # instantiable, and fall back to the older methods
+    calls = []
+
+    class MyEncoder(model.Encoder):
+        def write_string(self, v):
+            calls.append(("string", v))
+
+        def write_datetime(self, v):
+            pass
+
+        def write_integer(self, v):
+            pass
+
+        def write_iri(self, v, compact=None):
+            calls.append(("iri", v, compact))
+
+        def write_enum(self, v, e, compact=None):
+            pass
+
+        def write_bool(self, v):
+            pass
+
+        def write_float(self, v):
+            calls.append(("float", v))
+
+        def write_object(self, typ, compact_type, id_alias, _id, compact_id, needs_id):
+            pass
+
+        def write_property(self, iri, compact=None):
+            pass
+
+        def write_list(self):
+            pass
+
+        def write_list_item(self):
+            pass
+
+        def write_object_list(self):
+            pass
+
+        def write_dict(self):
+            pass
+
+    enc = MyEncoder()
+    enc.write_double(1.5)
+    enc.write_iri_ref("http://a/b", "a:b")
+    assert calls == [("float", 1.5), ("iri", "http://a/b", "a:b")]
+
+    with pytest.raises(NotImplementedError):
+        enc.write_typed_literal("1", XSD + "decimal")
+    with pytest.raises(NotImplementedError):
+        enc.write_lang_string("a", "en")
+
+
+@pytest.fixture(scope="module")
+def alias_model(tmp_path_factory):
+    # A model whose context aliases @id and @type, as the SPDX 3 context does
+    tmp_directory = tmp_path_factory.mktemp("pythonaliascontext")
+    module_name = "pymodel_alias"
+
+    with TEST_CONTEXT.open("r") as f:
+        ctx = json.load(f)
+    ctx["@context"]["spdxId"] = "@id"
+    ctx["@context"]["type"] = "@type"
+    context_file = tmp_directory / "alias-context.json"
+    with context_file.open("w") as f:
+        json.dump(ctx, f)
+
+    shacl2code_generate(
+        [
+            "--input",
+            TEST_MODEL,
+            "--context-url",
+            context_file,
+            ALIAS_CONTEXT_URL,
+        ],
+        [],
+        tmp_directory / module_name,
+    )
+
+    sys.path.append(str(tmp_directory))
+    try:
+        yield importlib.import_module(module_name)
+    finally:
+        sys.path.remove(str(tmp_directory))
+        for mod in list(sys.modules):
+            if mod == module_name or mod.startswith(module_name + "."):
+                del sys.modules[mod]
+
+
+ALIAS_CONTEXT_URL = "https://example.org/shacl2code-test/alias-context.json"
+
+
+def test_extensible_keyword_aliases(alias_model):
+    model = alias_model
+    DATA = {
+        "@context": ALIAS_CONTEXT_URL,
+        "type": EXT_PREFIX + "test-extensible",
+        "@id": EXT_PREFIX + "e",
+        "extensible-class/required": "required",
+        EXT_PREFIX + "iri-prop": {"spdxId": EXT_PREFIX + "iri-value"},
+        EXT_PREFIX + "literal-prop": {"@value": "0.35", "type": XSD + "decimal"},
+    }
+
+    objset = model.SHACLObjectSet()
+    model.JSONLDDeserializer().deserialize_data(DATA, objset)
+    (e,) = objset.objects
+    assert e[EXT_PREFIX + "iri-prop"] == model.IRIRef(EXT_PREFIX + "iri-value")
+    assert e[EXT_PREFIX + "literal-prop"] == model.TypedLiteral("0.35", XSD + "decimal")
+
+    data = model.JSONLDSerializer().serialize_data(objset)
+    assert data[EXT_PREFIX + "iri-prop"] == [{"@id": EXT_PREFIX + "iri-value"}]
+    assert data[EXT_PREFIX + "literal-prop"] == [
+        {"@value": "0.35", "@type": XSD + "decimal"}
+    ]
 
 
 def test_custom_objset_index(model, test_context_url):

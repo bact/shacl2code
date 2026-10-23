@@ -11,6 +11,7 @@ import decimal
 import functools
 import hashlib
 import json
+import math
 import re
 import sys
 import threading
@@ -1403,11 +1404,21 @@ class SHACLObject(metaclass=SHACLObjectMeta):
 
                 possible.sort(key=lambda k: k._TYPE)
 
+                last_error: Optional[PathError] = None
                 for t in possible:
+                    # Objects registered by a failed attempt must not be
+                    # returned by the next attempt
+                    read_objs = dict(state.read_objs)
                     try:
                         return SHACLObject.decode(decoder, state, path, t)
-                    except (ValidationError, DecodeError):
-                        pass
+                    except (ValidationError, DecodeError) as e:
+                        state.read_objs = read_objs
+                        last_error = e
+
+                raise DecodeError(
+                    path,
+                    f"Unable to create object of type '{typ_iri}'. No matching extensible class",
+                ) from last_error
 
             raise DecodeError(
                 path,
@@ -1538,13 +1549,29 @@ class SHACLObject(metaclass=SHACLObjectMeta):
         return SHACLObject._sort_key(self) < SHACLObject._sort_key(other)
 
 
+_XSD = "http://www.w3.org/2001/XMLSchema#"
+_XSD_STRING = _XSD + "string"
+_XSD_BOOLEAN = _XSD + "boolean"
+_XSD_INTEGER = _XSD + "integer"
+_XSD_DOUBLE = _XSD + "double"
+_RDF_JSON = "http://www.w3.org/1999/02/22-rdf-syntax-ns#JSON"
+
+# IRI characters a JSON-LD term must end with to be usable as a prefix
+_GEN_DELIMS = ":/?#[]@"
+
+_XSD_INTEGER_RE = re.compile(r"[+-]?[0-9]+")
+_XSD_DOUBLE_RE = re.compile(
+    r"[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?|[+-]?INF|NaN"
+)
+
+
 @dataclass(frozen=True, **_DC_KWARGS)
 class IRIRef:
     """
     An IRI reference value of an extensible property
 
     Serialized in JSON-LD as a node reference (e.g. `{"@id": "http://..."}`)
-    and in RDF as an IRI node
+    and in RDF as an IRI node, or a blank node if `iri` starts with `_:`
     """
 
     iri: str
@@ -1555,13 +1582,158 @@ class TypedLiteral:
     """
     A literal value with an explicit datatype IRI of an extensible property
 
+    `value` is the lexical form of the literal, so two `TypedLiteral` are
+    equal if they are the same RDF term (e.g. `"1.0"` and `"1.00"` are
+    different, even if they are the same `xsd:decimal` value). The lexical
+    form is not validated against the datatype.
+
     Serialized in JSON-LD as a value object (e.g.
     `{"@value": "1.0", "@type": "http://www.w3.org/2001/XMLSchema#decimal"}`)
-    and in RDF as a typed literal
+    and in RDF as a typed literal. A JSON literal (datatype `rdf:JSON`) holds
+    the JSON text and is serialized in JSON-LD as
+    `{"@value": <JSON>, "@type": "@json"}`
+
+    Literals of type xsd:string, xsd:boolean, xsd:integer and xsd:double are
+    read as the native Python types instead
     """
 
-    value: Union[str, int, float, bool]
+    value: str
     datatype: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.value, str):
+            raise TypeError(
+                f"TypedLiteral value must be a lexical form string. Got {self.value!r}"
+            )
+
+
+@dataclass(frozen=True, **_DC_KWARGS)
+class LangString:
+    """
+    A language-tagged string value of an extensible property
+
+    Serialized in JSON-LD as a value object (e.g.
+    `{"@value": "chat", "@language": "fr"}`) and in RDF as a language-tagged
+    literal. The base `direction` ("ltr" or "rtl") is only represented in
+    JSON-LD; it is dropped when writing RDF, as the JSON-LD to RDF algorithm
+    does by default
+    """
+
+    value: str
+    language: str
+    direction: Optional[str] = None
+
+
+def _xsd_double_lexical(v: float) -> str:
+    """Returns the canonical XSD lexical form of a double, e.g. `1.5E0`"""
+    if v != v:
+        return "NaN"
+    if v == float("inf"):
+        return "INF"
+    if v == float("-inf"):
+        return "-INF"
+
+    mantissa, _, exponent = f"{decimal.Decimal(repr(v)).normalize():E}".partition("E")
+    if "." not in mantissa:
+        mantissa += ".0"
+    return mantissa + "E" + str(int(exponent))
+
+
+def _jsonld_lexical(v: Union[str, int, float, bool]) -> str:
+    """
+    Returns the lexical form of a JSON-LD native value, as the JSON-LD to RDF
+    algorithm does
+    """
+    if isinstance(v, str):
+        return v
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, int) and abs(v) < 10**21:
+        return str(v)
+    if isinstance(v, float) and v.is_integer() and abs(v) < 1e21:
+        return str(int(v))
+    return _xsd_double_lexical(float(v))
+
+
+def _literal_value(lexical: str, datatype: str) -> Any:
+    """
+    Returns the native Python value for a literal of the xsd:string,
+    xsd:boolean, xsd:integer and xsd:double types, or a `TypedLiteral` for
+    any other type, or a lexical form that is not valid for the type
+    """
+    if datatype == _XSD_STRING:
+        return lexical
+    if datatype == _XSD_BOOLEAN and lexical in ("true", "1", "false", "0"):
+        return lexical in ("true", "1")
+    if datatype == _XSD_INTEGER and _XSD_INTEGER_RE.fullmatch(lexical):
+        return int(lexical)
+    if datatype == _XSD_DOUBLE and _XSD_DOUBLE_RE.fullmatch(lexical):
+        return float(lexical)
+    return TypedLiteral(lexical, datatype)
+
+
+def _expand_prefix(context: Dict[str, str], iri: str, vocab: bool) -> str:
+    """
+    Expands an IRI using the terms of a local context
+
+    A compact IRI is only expanded if its prefix is a term whose IRI ends in a
+    gen-delim character, as JSON-LD 1.1 only allows those terms as prefixes. A
+    whole term is only expanded if `vocab` is True, since other IRIs (e.g.
+    `@id`) are document-relative
+    """
+    if iri.startswith("@"):
+        return iri
+
+    if vocab and isinstance(context.get(iri), str):
+        return _expand_prefix(context, context[iri], False)
+
+    prefix, sep, suffix = iri.partition(":")
+    if not sep or prefix == "_" or suffix.startswith("//"):
+        return iri
+
+    v = context.get(prefix)
+    if isinstance(v, str) and v and v[-1] in _GEN_DELIMS:
+        return v + suffix
+
+    return iri
+
+
+def _compact_prefix(context: Dict[str, str], iri: str, vocab: bool) -> str:
+    """
+    Compacts an IRI using the terms of a local context, such that
+    `_expand_prefix` gives back the same IRI
+    """
+    if vocab:
+        for k, v in context.items():
+            if v == iri:
+                return k
+
+    best = iri
+    for k, v in context.items():
+        if not v or v[-1] not in _GEN_DELIMS or not iri.startswith(v):
+            continue
+        suffix = iri[len(v) :]
+        if suffix.startswith("//"):
+            continue
+        compact = k + ":" + suffix
+        if vocab and compact in context:
+            continue
+        if len(compact) < len(best):
+            best = compact
+
+    return best
+
+
+def _describe_jsonld_form(v: Dict[Any, Any]) -> str:
+    """Names the (unsupported) JSON-LD form of a dictionary"""
+    keys = sorted(str(k) for k in v.keys())
+    if "@list" in v:
+        return f"JSON-LD list object (@list) with keys {keys}"
+    if "@set" in v:
+        return f"JSON-LD set object (@set) with keys {keys}"
+    if "@value" in v:
+        return f"JSON-LD value object with keys {keys}"
+    return f"embedded JSON-LD node object with keys {keys}"
 
 
 class SHACLExtensibleObject(SHACLObject):
@@ -1603,6 +1775,8 @@ class SHACLExtensibleObject(SHACLObject):
     def _decode_properties(
         self, decoder: Decoder, state: DecodeState, path: DataPath
     ) -> None:
+        context = state.objectset.context if state.objectset else {}
+
         def decode_value(d: Decoder, path: DataPath) -> Any:
             if not d.is_list():
                 try:
@@ -1611,17 +1785,20 @@ class SHACLExtensibleObject(SHACLObject):
                     raise DecodeError(path, str(e))
 
                 if isinstance(v, IRIRef):
-                    return IRIRef(state.expand_iri(v.iri) or v.iri)
+                    return IRIRef(_expand_prefix(context, v.iri, False))
                 if isinstance(v, TypedLiteral):
-                    return TypedLiteral(
-                        v.value, state.expand_iri(v.datatype) or v.datatype
+                    return _literal_value(
+                        v.value, _expand_prefix(context, v.datatype, True)
                     )
                 return v
 
             result = []
             for idx, val_d in enumerate(d.read_list()):
                 with path.push_index(idx) as p:
-                    result.append(decode_value(val_d, p))
+                    v = decode_value(val_d, p)
+                    # A null value (e.g. `{"@value": null}`) is no value
+                    if v is not None:
+                        result.append(v)
 
             return result
 
@@ -1647,7 +1824,9 @@ class SHACLExtensibleObject(SHACLObject):
             with decoder.read_property(key) as prop_d, path.push_path(key) as prop_path:
                 if prop_d is None:
                     raise DecodeError(path, f"Property '{key}' has no value")
-                self._ext_data[expanded_key] = decode_value(prop_d, prop_path)
+                value = decode_value(prop_d, prop_path)
+                if value is not None:
+                    self._ext_data[expanded_key] = value
 
     def _encode_properties(
         self, encoder: Encoder, state: EncodeState, path: DataPath
@@ -1655,6 +1834,8 @@ class SHACLExtensibleObject(SHACLObject):
         super()._encode_properties(encoder, state, path)
         if self.CLOSED:
             return
+
+        context = state.objectset.context if state.objectset else {}
 
         for iri, value in self._ext_data.items():
             if iri in self._OBJ_IRI_PROPS:
@@ -1680,12 +1861,26 @@ class SHACLExtensibleObject(SHACLObject):
                             elif isinstance(i, float):
                                 item_s.write_double(i)
                             elif isinstance(i, IRIRef):
-                                item_s.write_iri_ref(i.iri, state.compact_iri(i.iri))
+                                item_s.write_iri_ref(
+                                    i.iri, _compact_prefix(context, i.iri, False)
+                                )
                             elif isinstance(i, TypedLiteral):
-                                item_s.write_typed_literal(
-                                    i.value,
-                                    i.datatype,
-                                    state.compact_iri(i.datatype),
+                                try:
+                                    item_s.write_typed_literal(
+                                        i.value,
+                                        i.datatype,
+                                        _compact_prefix(context, i.datatype, True),
+                                    )
+                                except ValueError as e:
+                                    raise EncodeError(prop_path, str(e))
+                            elif isinstance(i, LangString):
+                                item_s.write_lang_string(
+                                    i.value, i.language, i.direction
+                                )
+                            elif isinstance(i, dict):
+                                raise EncodeError(
+                                    prop_path,
+                                    f"Unsupported {_describe_jsonld_form(i)}",
                                 )
                             else:
                                 raise EncodeError(
@@ -2377,31 +2572,82 @@ class JSONLDDecoder(Decoder):
         self.root = root
 
     def read_value(self) -> Optional[Any]:
-        if isinstance(self.data, dict):
-            # Node reference, e.g. {"@id": "http://..."}
-            if self.data.keys() == {"@id"}:
-                iri = self.data["@id"]
-                if not isinstance(iri, str):
-                    raise TypeError(
-                        f"Node reference '@id' must be a string. Got {iri!r}"
-                    )
-                return IRIRef(iri)
+        if not isinstance(self.data, dict):
+            return self.data
 
-            # Typed value object, e.g. {"@value": "1.0", "@type": "http://..."}
-            typ = self.__get_value("@type", "{{ context.compact_iri('@type') }}")
-            if "@value" in self.data and typ is not None and len(self.data) == 2:
-                value = self.data["@value"]
-                if not isinstance(typ, str):
-                    raise TypeError(
-                        f"Value object '@type' must be a string. Got {typ!r}"
-                    )
-                if not isinstance(value, (str, int, float, bool)):
-                    raise TypeError(
-                        f"Value object '@value' must be a scalar. Got {value!r}"
-                    )
-                return TypedLiteral(value, typ)
+        id_keys = ("@id", "{{ context.compact_iri('@id') }}")
+        type_keys = ("@type", "{{ context.compact_iri('@type') }}")
 
-        return self.data
+        # Node reference, e.g. {"@id": "http://..."}
+        if len(self.data) == 1 and next(iter(self.data)) in id_keys:
+            iri = next(iter(self.data.values()))
+            if not isinstance(iri, str):
+                raise TypeError(f"Node reference '@id' must be a string. Got {iri!r}")
+            return IRIRef(iri)
+
+        if "@value" not in self.data or not set(self.data.keys()) <= {
+            "@value",
+            "@language",
+            "@direction",
+            "@index",
+            *type_keys,
+        }:
+            # Other forms are not supported, and are kept as-is
+            return self.data
+
+        # Value object, e.g. {"@value": "1.0", "@type": "http://..."}. @index
+        # does not change the value and is ignored
+        value = self.data["@value"]
+        typ = self.__get_value(*type_keys)
+        language = self.data.get("@language")
+        direction = self.data.get("@direction")
+
+        if typ is not None:
+            if not isinstance(typ, str):
+                raise TypeError(f"Value object '@type' must be a string. Got {typ!r}")
+            if language is not None or direction is not None:
+                raise TypeError(
+                    "Value object cannot have both '@type' and '@language' or '@direction'"
+                )
+            if typ == "@json":
+                return TypedLiteral(
+                    json.dumps(
+                        value,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    ),
+                    _RDF_JSON,
+                )
+
+        if value is None:
+            return None
+
+        if language is not None or direction is not None:
+            if not isinstance(value, str):
+                raise TypeError(
+                    f"Language-tagged value object '@value' must be a string. Got {value!r}"
+                )
+            if language is not None and not isinstance(language, str):
+                raise TypeError(
+                    f"Value object '@language' must be a string. Got {language!r}"
+                )
+            if direction not in (None, "ltr", "rtl"):
+                raise TypeError(
+                    f"Value object '@direction' must be 'ltr' or 'rtl'. Got {direction!r}"
+                )
+            if language is None:
+                # A base direction without a language is not supported
+                return self.data
+            return LangString(value, language, direction)
+
+        if not isinstance(value, (str, int, float, bool)):
+            raise TypeError(f"Value object '@value' must be a scalar. Got {value!r}")
+
+        if typ is None:
+            return value
+
+        return TypedLiteral(_jsonld_lexical(value), typ)
 
     def read_string(self) -> Optional[str]:
         if isinstance(self.data, str):
@@ -2598,18 +2844,19 @@ class Encoder(ABC):
         """
         raise NotImplementedError("Subclasses must implement write_float method")
 
-    @abstractmethod
     def write_double(self, v: float) -> None:
         """
         Write double
 
-        Encodes the value as a native floating point number (xsd:double) in
-        the output. Unlike `write_float`, the value is not written in a form
-        that relies on the context to declare its datatype
-        """
-        raise NotImplementedError("Subclasses must implement write_double method")
+        Encodes the value as a floating point number (xsd:double) in the
+        output. Unlike `write_float`, the value is not written in a form that
+        relies on the context to declare its datatype. Non-finite values must
+        be written with the XSD lexical forms `NaN`, `INF` and `-INF`
 
-    @abstractmethod
+        The default implementation calls `write_float`
+        """
+        self.write_float(v)
+
     def write_iri_ref(self, v: str, compact: Optional[str] = None) -> None:
         """
         Write IRI reference
@@ -2617,26 +2864,49 @@ class Encoder(ABC):
         Encodes the string as an explicit IRI reference. Unlike `write_iri`,
         the value is not written in a form that relies on the context to
         declare it as an IRI. If `compact` is provided and the serialization
-        supports compacted IRIs, it should be preferred to the full IRI
-        """
-        raise NotImplementedError("Subclasses must implement write_iri_ref method")
+        supports compacted IRIs, it should be preferred to the full IRI. IRIs
+        that start with `_:` are blank node identifiers
 
-    @abstractmethod
+        The default implementation calls `write_iri`
+        """
+        self.write_iri(v, compact)
+
     def write_typed_literal(
         self,
-        v: Union[str, int, float, bool],
+        v: str,
         datatype: str,
         compact_datatype: Optional[str] = None,
     ) -> None:
         """
         Write typed literal
 
-        Encodes the value as a literal with an explicit datatype IRI. If
-        `compact_datatype` is provided and the serialization supports
+        Encodes the lexical form `v` as a literal with an explicit datatype
+        IRI. If `compact_datatype` is provided and the serialization supports
         compacted IRIs, it should be preferred to the full datatype IRI
+
+        The default implementation raises `NotImplementedError`
         """
         raise NotImplementedError(
-            "Subclasses must implement write_typed_literal method"
+            f"{self.__class__.__name__} does not implement write_typed_literal"
+        )
+
+    def write_lang_string(
+        self,
+        v: str,
+        language: str,
+        direction: Optional[str] = None,
+    ) -> None:
+        """
+        Write language-tagged string
+
+        Encodes the string as a literal with a language tag and optional base
+        direction ("ltr" or "rtl"). Serializations that cannot represent the
+        base direction should drop it
+
+        The default implementation raises `NotImplementedError`
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement write_lang_string"
         )
 
     @abstractmethod
@@ -2763,18 +3033,38 @@ class JSONLDEncoder(Encoder):
         self.data = str(v)
 
     def write_double(self, v: float) -> None:
-        self.data = v
+        if not math.isfinite(v):
+            # NaN and Infinity are not valid JSON numbers
+            self.data = {"@value": _xsd_double_lexical(v), "@type": _XSD_DOUBLE}
+        elif v.is_integer():
+            # JSON-LD reads a number without a fractional part as xsd:integer
+            self.data = {"@value": v, "@type": _XSD_DOUBLE}
+        else:
+            self.data = v
 
     def write_iri_ref(self, v: str, compact: Optional[str] = None) -> None:
         self.data = {"@id": compact or v}
 
     def write_typed_literal(
         self,
-        v: Union[str, int, float, bool],
+        v: str,
         datatype: str,
         compact_datatype: Optional[str] = None,
     ) -> None:
-        self.data = {"@value": v, "@type": compact_datatype or datatype}
+        if datatype == _RDF_JSON:
+            self.data = {"@value": json.loads(v), "@type": "@json"}
+        else:
+            self.data = {"@value": v, "@type": compact_datatype or datatype}
+
+    def write_lang_string(
+        self,
+        v: str,
+        language: str,
+        direction: Optional[str] = None,
+    ) -> None:
+        self.data = {"@value": v, "@language": language}
+        if direction is not None:
+            self.data["@direction"] = direction
 
     @contextmanager
     def write_property(
@@ -2929,7 +3219,20 @@ class JSONLDInlineEncoder(Encoder):
         self.write(json.dumps(str(v)))
 
     def write_double(self, v: float) -> None:
-        self.write(json.dumps(v))
+        if math.isfinite(v) and not v.is_integer():
+            self.write(json.dumps(v))
+            return
+
+        # NaN and Infinity are not valid JSON numbers, and JSON-LD reads a
+        # number without a fractional part as xsd:integer
+        with self.write_dict() as d:
+            with d.write_property("@value") as value_prop:
+                if math.isfinite(v):
+                    value_prop.write(json.dumps(v))
+                else:
+                    value_prop.write_string(_xsd_double_lexical(v))
+            with d.write_property("@type") as type_prop:
+                type_prop.write_string(_XSD_DOUBLE)
 
     def write_iri_ref(self, v: str, compact: Optional[str] = None) -> None:
         with self.write_dict() as d:
@@ -2938,15 +3241,44 @@ class JSONLDInlineEncoder(Encoder):
 
     def write_typed_literal(
         self,
-        v: Union[str, int, float, bool],
+        v: str,
         datatype: str,
         compact_datatype: Optional[str] = None,
     ) -> None:
         with self.write_dict() as d:
             with d.write_property("@value") as value_prop:
-                value_prop.write(json.dumps(v))
+                if datatype == _RDF_JSON:
+                    value_prop.write(
+                        json.dumps(
+                            json.loads(v),
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=False,
+                            allow_nan=False,
+                        )
+                    )
+                else:
+                    value_prop.write_string(v)
             with d.write_property("@type") as type_prop:
-                type_prop.write_string(compact_datatype or datatype)
+                if datatype == _RDF_JSON:
+                    type_prop.write_string("@json")
+                else:
+                    type_prop.write_string(compact_datatype or datatype)
+
+    def write_lang_string(
+        self,
+        v: str,
+        language: str,
+        direction: Optional[str] = None,
+    ) -> None:
+        with self.write_dict() as d:
+            with d.write_property("@value") as value_prop:
+                value_prop.write_string(v)
+            with d.write_property("@language") as language_prop:
+                language_prop.write_string(language)
+            if direction is not None:
+                with d.write_property("@direction") as direction_prop:
+                    direction_prop.write_string(direction)
 
     @contextmanager
     def write_property(
@@ -3120,35 +3452,53 @@ try:
                 return None
             return self.graph.value(self.subject, self.predicate)
 
-        def read_value(self) -> Optional[Any]:
+        def __read_literal(self) -> Optional[Any]:
             v = self.__read_node()
             if isinstance(v, Literal):
                 return v.toPython()
             return None
 
+        def read_value(self) -> Optional[Any]:
+            v = self.__read_node()
+            if v is None and self.predicate is None:
+                # An object node that is a value of a property
+                v = self.subject
+
+            if isinstance(v, BNode):
+                return IRIRef("_:" + str(v))
+            if isinstance(v, URIRef):
+                return IRIRef(str(v))
+            if not isinstance(v, Literal):
+                return None
+            if v.language is not None:
+                return LangString(str(v), v.language)
+            if v.datatype is None:
+                return str(v)
+            return _literal_value(str(v), str(v.datatype))
+
         def read_string(self) -> Optional[str]:
-            v = self.read_value()
+            v = self.__read_literal()
             if isinstance(v, str):
                 return v
             return None
 
         def read_datetime(self) -> Optional[str]:
-            return self.read_value()
+            return self.__read_literal()
 
         def read_integer(self) -> Optional[int]:
-            v = self.read_value()
+            v = self.__read_literal()
             if isinstance(v, (int, decimal.Decimal)):
                 return int(v)
             return None
 
         def read_bool(self) -> Optional[bool]:
-            v = self.read_value()
+            v = self.__read_literal()
             if isinstance(v, bool):
                 return v
             return None
 
         def read_float(self) -> Optional[float]:
-            v = self.read_value()
+            v = self.__read_literal()
             if isinstance(v, (int, float, str, decimal.Decimal)):
                 return float(v)
             return None
@@ -3200,7 +3550,7 @@ try:
         def is_list(self) -> bool:
             if not self.subject:
                 return True
-            if self.value is not None:
+            if self.value is not None or self.predicate is None:
                 return False
             return len(list(self.graph.objects(self.subject, self.predicate))) > 1
 
@@ -3267,16 +3617,15 @@ try:
             self.subject: Optional[Node] = subject
             self.predicate: Optional[Node] = predicate
 
-        def __add_literal(self, v: Any, datatype: Optional[str] = None) -> None:
+        def __add_literal(self, v: Any) -> None:
             if self.subject is None or self.predicate is None:
                 raise TypeError("Subject and predicate of literal value cannot be None")
-            self.graph.add(
-                (
-                    self.subject,
-                    self.predicate,
-                    Literal(v, datatype=URIRef(datatype) if datatype else None),
-                )
-            )
+            self.graph.add((self.subject, self.predicate, Literal(v)))
+
+        def __add_node(self, v: Node) -> None:
+            if self.subject is None or self.predicate is None:
+                raise TypeError("Subject and predicate of value cannot be None")
+            self.graph.add((self.subject, self.predicate, v))
 
         def __add_uriref(self, v: str) -> None:
             if self.subject is None or self.predicate is None:
@@ -3305,18 +3654,41 @@ try:
             self.__add_literal(v)
 
         def write_double(self, v: float) -> None:
-            self.__add_literal(v)
+            if math.isfinite(v):
+                self.__add_literal(v)
+            else:
+                self.__add_node(
+                    Literal(
+                        _xsd_double_lexical(v),
+                        datatype=URIRef(_XSD_DOUBLE),
+                        normalize=False,
+                    )
+                )
 
         def write_iri_ref(self, v: str, compact: Optional[str] = None) -> None:
-            self.__add_uriref(v)
+            if v.startswith("_:"):
+                self.__add_node(BNode(v[2:]))
+            else:
+                self.__add_node(URIRef(v))
 
         def write_typed_literal(
             self,
-            v: Union[str, int, float, bool],
+            v: str,
             datatype: str,
             compact_datatype: Optional[str] = None,
         ) -> None:
-            self.__add_literal(v, datatype)
+            # Keep the lexical form as-is
+            self.__add_node(Literal(v, datatype=URIRef(datatype), normalize=False))
+
+        def write_lang_string(
+            self,
+            v: str,
+            language: str,
+            direction: Optional[str] = None,
+        ) -> None:
+            # RDF 1.1 literals have no base direction. It is dropped, as the
+            # JSON-LD to RDF algorithm does by default
+            self.__add_node(Literal(v, lang=language))
 
         @contextmanager
         def write_property(
