@@ -2205,7 +2205,7 @@ class SHACLObjectSet(object):
 
         new_objects: Set[SHACLObject] = set()
         for o in self.objects:
-            if is_IRI(o._id):
+            if is_IRI(o._id) and not (_inline_only(o) and ref_counts[o] == 2):
                 new_objects.add(o)
             # If the object is a blank node and is only referenced by this
             # root list and one other location, remove it from the root list
@@ -2232,7 +2232,7 @@ class SHACLObjectSet(object):
         """
         ref_counts: Dict[SHACLObject, int] = {}
 
-        def walk_callback(value: SHACLObject, path: DataPath) -> bool:
+        def count_callback(value: SHACLObject, path: DataPath) -> bool:
             if not isinstance(value, SHACLObject):
                 return True
 
@@ -2240,24 +2240,21 @@ class SHACLObjectSet(object):
             if is_blank_node(value._id):
                 del value._id
 
-            if value._id:
-                state.add_refed(value)
-
-            # If the object is referenced more than once, add it to the set of
-            # referenced objects
             ref_counts.setdefault(value, 0)
             ref_counts[value] += 1
-            if ref_counts[value] > 1:
-                state.add_refed(value)
-                return False
+            return ref_counts[value] == 1
 
-            return True
+        self.walk(count_callback)
 
-        for o in self.objects:
-            if o._id:
+        for o, count in ref_counts.items():
+            # An object referenced more than once is written once and
+            # referenced by ID elsewhere. An object with an IRI is written at
+            # the top level, unless its type is not in the model and it is
+            # referenced only once: such an object (e.g. a custom extension)
+            # may have no top-level form in the serialization, so keep it
+            # inline where it is used.
+            if count > 1 or (o._id and not (_inline_only(o) and o not in self.objects)):
                 state.add_refed(o)
-
-        self.walk(walk_callback)
 
         use_list = force_list or len(self.objects) > 1
 
@@ -2329,6 +2326,11 @@ class SHACLObjectSet(object):
                 new_iri = k + ":" + iri[len(v) :]
                 return self.compact_iri(new_iri, new_iri)
         return default
+
+
+def _inline_only(o: SHACLObject) -> bool:
+    """True for an extensible object whose type is not a class of the model."""
+    return isinstance(o, SHACLExtensibleObject) and o.get_type() not in SHACLObject.CLASSES
 
 
 class EncodeState(object):
@@ -3523,7 +3525,11 @@ try:
 
         def read_list(self) -> Iterator["RDFDecoder"]:
             if not self.subject:
+                # Decode blank nodes and objects of types not in the model
+                # last, so that they are first reached through a property
+                # whose range tells which class to use for them
                 blank_nodes = set()
+                unknown_types = set()
                 for s in self.graph.subjects(unique=True):
                     if (s, RDF.type, None) not in self.graph:
                         continue
@@ -3531,6 +3537,16 @@ try:
                     if isinstance(s, BNode):
                         blank_nodes.add(s)
                         continue
+
+                    if not any(
+                        str(t) in SHACLObject.CLASSES
+                        for t in self.graph.objects(s, RDF.type)
+                    ):
+                        unknown_types.add(s)
+                        continue
+                    yield self.__class__(self.graph, s)
+
+                for s in sorted(unknown_types, key=str):
                     yield self.__class__(self.graph, s)
 
                 for s in blank_nodes:

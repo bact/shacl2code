@@ -3463,3 +3463,49 @@ bibo:status <http://purl.org/ontology/bibo/status/draft> .
             ), f"Failed for case {idx}: {annotations}"
         finally:
             sys.path.remove(str(tmp_path))
+
+
+def test_custom_type_with_iri_stays_inline(model, test_context_url):
+    # An object of a type the model does not define may have no top-level
+    # form in the serialization (e.g. an SPDX custom extension), so it must
+    # stay inline where it is used, even when it has an IRI
+    DATA = {
+        "@context": test_context_url,
+        "@graph": [
+            {
+                "@type": "uses-extensible-abstract-class",
+                "@id": EXT_PREFIX + "user",
+                "uses-extensible-abstract-class/prop": {
+                    "@type": EXT_PREFIX + "custom-extension",
+                    "@id": EXT_PREFIX + "custom",
+                    EXT_PREFIX + "p": "v",
+                },
+            },
+            # A second top-level object, so that the serializer writes @graph
+            {
+                "@type": "uses-extensible-abstract-class",
+                "@id": EXT_PREFIX + "other",
+                "uses-extensible-abstract-class/prop": {
+                    "@type": EXT_PREFIX + "custom-extension",
+                },
+            },
+        ],
+    }
+
+    def check(objset):
+        doc = model.JSONLDSerializer().serialize_data(objset)
+        graph = {o["@id"]: o for o in doc["@graph"]}
+        assert sorted(graph) == [EXT_PREFIX + "other", EXT_PREFIX + "user"]
+        prop = graph[EXT_PREFIX + "user"]["uses-extensible-abstract-class/prop"]
+        assert prop["@id"] == EXT_PREFIX + "custom"
+        assert prop[EXT_PREFIX + "p"] == ["v"]
+
+    objset = model.SHACLObjectSet()
+    model.JSONLDDeserializer().deserialize_data(DATA, objset)
+    check(objset)
+
+    g = rdflib.Graph()
+    model.RDFSerializer().write(objset, g)
+    objset2 = model.SHACLObjectSet()
+    model.RDFDeserializer().read(g, objset2)
+    check(objset2)
