@@ -22,16 +22,19 @@ pymodel.model.Decoder.read_value
 pymodel.model.Encoder.write_bool
 pymodel.model.Encoder.write_datetime
 pymodel.model.Encoder.write_dict
+pymodel.model.Encoder.write_double
 pymodel.model.Encoder.write_enum
 pymodel.model.Encoder.write_float
 pymodel.model.Encoder.write_integer
 pymodel.model.Encoder.write_iri
+pymodel.model.Encoder.write_iri_ref
 pymodel.model.Encoder.write_list
 pymodel.model.Encoder.write_list_item
 pymodel.model.Encoder.write_object
 pymodel.model.Encoder.write_object_list
 pymodel.model.Encoder.write_property
 pymodel.model.Encoder.write_string
+pymodel.model.Encoder.write_typed_literal
 pymodel.model.JSONLDDecoder
 pymodel.model.JSONLDEncoder
 pymodel.model.JSONLDInlineEncoder
@@ -70,14 +73,17 @@ pymodel.Decoder.read_value
 pymodel.Encoder.write_bool
 pymodel.Encoder.write_datetime
 pymodel.Encoder.write_dict
+pymodel.Encoder.write_double
 pymodel.Encoder.write_enum
 pymodel.Encoder.write_float
 pymodel.Encoder.write_integer
 pymodel.Encoder.write_iri
+pymodel.Encoder.write_iri_ref
 pymodel.Encoder.write_list
 pymodel.Encoder.write_list_item
 pymodel.Encoder.write_object
 pymodel.Encoder.write_object_list
 pymodel.Encoder.write_property
 pymodel.Encoder.write_string
+pymodel.Encoder.write_typed_literal
 

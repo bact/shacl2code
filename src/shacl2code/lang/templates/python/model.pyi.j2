@@ -401,6 +401,14 @@ class Encoder(ABC):
     ) -> None: ...
     def write_bool(self, v: bool) -> None: ...
     def write_float(self, v: float) -> None: ...
+    def write_double(self, v: float) -> None: ...
+    def write_iri_ref(self, v: str, compact: Optional[str] = None) -> None: ...
+    def write_typed_literal(
+        self,
+        v: Union[str, int, float, bool],
+        datatype: str,
+        compact_datatype: Optional[str] = None,
+    ) -> None: ...
     def write_object(
         self,
         typ: str,
@@ -495,6 +503,17 @@ class SHACLObject(metaclass=SHACLObjectMeta):
     def __hash__(self) -> int: ...
     def __eq__(self, other: Any) -> bool: ...
     def __lt__(self, other: Any) -> bool: ...
+
+
+@dataclass(frozen=True)
+class IRIRef:
+    iri: str
+
+
+@dataclass(frozen=True)
+class TypedLiteral:
+    value: Union[str, int, float, bool]
+    datatype: str
 
 
 class SHACLExtensibleObject(SHACLObject):

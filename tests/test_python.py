@@ -1504,7 +1504,7 @@ def test_extensible_prop(model, test_context_url, prop, serkey, value, expect):
             "http://example.org/shacl2code-test/extensible-test-prop",
             1.123,
             SAME_AS_VALUE,
-            ["1.123"],
+            [1.123],
             [1.123],
         ),
         (
@@ -1518,8 +1518,15 @@ def test_extensible_prop(model, test_context_url, prop, serkey, value, expect):
             "http://example.org/shacl2code-test/extensible-test-prop",
             [1, "foo", 1.123],
             SAME_AS_VALUE,
-            [1, "foo", "1.123"],
             [1, "foo", 1.123],
+            [1, "foo", 1.123],
+        ),
+        (
+            "http://example.org/shacl2code-test/extensible-test-prop",
+            "1.10",
+            SAME_AS_VALUE,
+            ["1.10"],
+            ["1.10"],
         ),
         (
             "http://example.org/shacl2code-test/extensible-test-prop",
@@ -2181,6 +2188,97 @@ def test_extensible_properties(model, test_context_url):
     # Ensure the context is preserved
     s = model.JSONLDSerializer()
     assert s.serialize_data(objset, True) == DATA
+
+
+def test_extensible_value_objects(model, test_context_url, tmp_path):
+    # JSON-LD node references and value objects in extensible properties
+    # must round trip, as must native JSON values
+    XSD_DECIMAL = "http://www.w3.org/2001/XMLSchema#decimal"
+    PREFIX = "http://example.org/shacl2code-test/"
+
+    DATA = {
+        "@context": test_context_url,
+        "@type": PREFIX + "test-extensible",
+        "@id": PREFIX + "e",
+        "extensible-class/required": "required",
+        PREFIX + "iri-prop": {"@id": PREFIX + "iri-value"},
+        PREFIX + "literal-prop": {"@value": "0.35", "@type": XSD_DECIMAL},
+        PREFIX + "float-prop": 0.35,
+        PREFIX + "string-prop": "1.10",
+        PREFIX
+        + "mixed-prop": [
+            {"@id": PREFIX + "iri-value"},
+            {"@value": "1.5", "@type": XSD_DECIMAL},
+            1.5,
+            "1.5",
+            1,
+            True,
+        ],
+    }
+
+    objset = model.SHACLObjectSet()
+    model.JSONLDDeserializer().deserialize_data(DATA, objset)
+
+    e = objset.find_by_id(PREFIX + "e")
+    assert isinstance(e, model.extensible_class)
+    assert e[PREFIX + "iri-prop"] == model.IRIRef(PREFIX + "iri-value")
+    assert e[PREFIX + "literal-prop"] == model.TypedLiteral("0.35", XSD_DECIMAL)
+    assert e[PREFIX + "float-prop"] == 0.35
+    assert e[PREFIX + "string-prop"] == "1.10"
+    assert e[PREFIX + "mixed-prop"] == [
+        model.IRIRef(PREFIX + "iri-value"),
+        model.TypedLiteral("1.5", XSD_DECIMAL),
+        1.5,
+        "1.5",
+        1,
+        True,
+    ]
+
+    # Extensible properties are always written as lists
+    expect = {
+        k: [v] if k.startswith(PREFIX) and not isinstance(v, list) else v
+        for k, v in DATA.items()
+    }
+
+    assert model.JSONLDSerializer().serialize_data(objset) == expect
+
+    outfile = tmp_path / "out.json"
+    with outfile.open("wb") as f:
+        model.JSONLDInlineSerializer().write(objset, f)
+    with outfile.open("r") as f:
+        # The inline serializer always writes a @graph
+        assert json.load(f) == {
+            "@context": test_context_url,
+            "@graph": [{k: v for k, v in expect.items() if k != "@context"}],
+        }
+
+    g = rdflib.Graph()
+    model.RDFSerializer().write(objset, g)
+    subject = rdflib.URIRef(PREFIX + "e")
+    assert g.value(subject, rdflib.URIRef(PREFIX + "iri-prop")) == rdflib.URIRef(
+        PREFIX + "iri-value"
+    )
+    assert g.value(subject, rdflib.URIRef(PREFIX + "literal-prop")) == rdflib.Literal(
+        "0.35", datatype=rdflib.URIRef(XSD_DECIMAL)
+    )
+
+
+def test_extensible_value_objects_invalid(model, test_context_url):
+    PREFIX = "http://example.org/shacl2code-test/"
+
+    for value in (
+        {"@id": 1},
+        {"@value": "1", "@type": 1},
+    ):
+        with pytest.raises(model.DecodeError):
+            model.JSONLDDeserializer().deserialize_data(
+                {
+                    "@context": test_context_url,
+                    "@type": PREFIX + "test-extensible",
+                    PREFIX + "prop": value,
+                },
+                model.SHACLObjectSet(),
+            )
 
 
 def test_custom_objset_index(model, test_context_url):

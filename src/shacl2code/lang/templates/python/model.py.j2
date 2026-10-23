@@ -1538,6 +1538,32 @@ class SHACLObject(metaclass=SHACLObjectMeta):
         return SHACLObject._sort_key(self) < SHACLObject._sort_key(other)
 
 
+@dataclass(frozen=True, **_DC_KWARGS)
+class IRIRef:
+    """
+    An IRI reference value of an extensible property
+
+    Serialized in JSON-LD as a node reference (e.g. `{"@id": "http://..."}`)
+    and in RDF as an IRI node
+    """
+
+    iri: str
+
+
+@dataclass(frozen=True, **_DC_KWARGS)
+class TypedLiteral:
+    """
+    A literal value with an explicit datatype IRI of an extensible property
+
+    Serialized in JSON-LD as a value object (e.g.
+    `{"@value": "1.0", "@type": "http://www.w3.org/2001/XMLSchema#decimal"}`)
+    and in RDF as a typed literal
+    """
+
+    value: Union[str, int, float, bool]
+    datatype: str
+
+
 class SHACLExtensibleObject(SHACLObject):
     """A SHACLObject that accepts and round-trips arbitrary IRI-keyed extension properties."""
 
@@ -1580,9 +1606,17 @@ class SHACLExtensibleObject(SHACLObject):
         def decode_value(d: Decoder, path: DataPath) -> Any:
             if not d.is_list():
                 try:
-                    return d.read_value()
+                    v = d.read_value()
                 except TypeError as e:
                     raise DecodeError(path, str(e))
+
+                if isinstance(v, IRIRef):
+                    return IRIRef(state.expand_iri(v.iri) or v.iri)
+                if isinstance(v, TypedLiteral):
+                    return TypedLiteral(
+                        v.value, state.expand_iri(v.datatype) or v.datatype
+                    )
+                return v
 
             result = []
             for idx, val_d in enumerate(d.read_list()):
@@ -1644,7 +1678,15 @@ class SHACLExtensibleObject(SHACLObject):
                             elif isinstance(i, int):
                                 item_s.write_integer(i)
                             elif isinstance(i, float):
-                                item_s.write_float(i)
+                                item_s.write_double(i)
+                            elif isinstance(i, IRIRef):
+                                item_s.write_iri_ref(i.iri, state.compact_iri(i.iri))
+                            elif isinstance(i, TypedLiteral):
+                                item_s.write_typed_literal(
+                                    i.value,
+                                    i.datatype,
+                                    state.compact_iri(i.datatype),
+                                )
                             else:
                                 raise EncodeError(
                                     prop_path,
@@ -2335,11 +2377,30 @@ class JSONLDDecoder(Decoder):
         self.root = root
 
     def read_value(self) -> Optional[Any]:
-        if isinstance(self.data, str):
-            try:
-                return float(self.data)
-            except ValueError:
-                pass
+        if isinstance(self.data, dict):
+            # Node reference, e.g. {"@id": "http://..."}
+            if self.data.keys() == {"@id"}:
+                iri = self.data["@id"]
+                if not isinstance(iri, str):
+                    raise TypeError(
+                        f"Node reference '@id' must be a string. Got {iri!r}"
+                    )
+                return IRIRef(iri)
+
+            # Typed value object, e.g. {"@value": "1.0", "@type": "http://..."}
+            typ = self.__get_value("@type", "{{ context.compact_iri('@type') }}")
+            if "@value" in self.data and typ is not None and len(self.data) == 2:
+                value = self.data["@value"]
+                if not isinstance(typ, str):
+                    raise TypeError(
+                        f"Value object '@type' must be a string. Got {typ!r}"
+                    )
+                if not isinstance(value, (str, int, float, bool)):
+                    raise TypeError(
+                        f"Value object '@value' must be a scalar. Got {value!r}"
+                    )
+                return TypedLiteral(value, typ)
+
         return self.data
 
     def read_string(self) -> Optional[str]:
@@ -2538,6 +2599,47 @@ class Encoder(ABC):
         raise NotImplementedError("Subclasses must implement write_float method")
 
     @abstractmethod
+    def write_double(self, v: float) -> None:
+        """
+        Write double
+
+        Encodes the value as a native floating point number (xsd:double) in
+        the output. Unlike `write_float`, the value is not written in a form
+        that relies on the context to declare its datatype
+        """
+        raise NotImplementedError("Subclasses must implement write_double method")
+
+    @abstractmethod
+    def write_iri_ref(self, v: str, compact: Optional[str] = None) -> None:
+        """
+        Write IRI reference
+
+        Encodes the string as an explicit IRI reference. Unlike `write_iri`,
+        the value is not written in a form that relies on the context to
+        declare it as an IRI. If `compact` is provided and the serialization
+        supports compacted IRIs, it should be preferred to the full IRI
+        """
+        raise NotImplementedError("Subclasses must implement write_iri_ref method")
+
+    @abstractmethod
+    def write_typed_literal(
+        self,
+        v: Union[str, int, float, bool],
+        datatype: str,
+        compact_datatype: Optional[str] = None,
+    ) -> None:
+        """
+        Write typed literal
+
+        Encodes the value as a literal with an explicit datatype IRI. If
+        `compact_datatype` is provided and the serialization supports
+        compacted IRIs, it should be preferred to the full datatype IRI
+        """
+        raise NotImplementedError(
+            "Subclasses must implement write_typed_literal method"
+        )
+
+    @abstractmethod
     @contextmanager
     def write_object(
         self,
@@ -2659,6 +2761,20 @@ class JSONLDEncoder(Encoder):
 
     def write_float(self, v: float) -> None:
         self.data = str(v)
+
+    def write_double(self, v: float) -> None:
+        self.data = v
+
+    def write_iri_ref(self, v: str, compact: Optional[str] = None) -> None:
+        self.data = {"@id": compact or v}
+
+    def write_typed_literal(
+        self,
+        v: Union[str, int, float, bool],
+        datatype: str,
+        compact_datatype: Optional[str] = None,
+    ) -> None:
+        self.data = {"@value": v, "@type": compact_datatype or datatype}
 
     @contextmanager
     def write_property(
@@ -2811,6 +2927,26 @@ class JSONLDInlineEncoder(Encoder):
 
     def write_float(self, v: float) -> None:
         self.write(json.dumps(str(v)))
+
+    def write_double(self, v: float) -> None:
+        self.write(json.dumps(v))
+
+    def write_iri_ref(self, v: str, compact: Optional[str] = None) -> None:
+        with self.write_dict() as d:
+            with d.write_property("@id") as id_prop:
+                id_prop.write_string(compact or v)
+
+    def write_typed_literal(
+        self,
+        v: Union[str, int, float, bool],
+        datatype: str,
+        compact_datatype: Optional[str] = None,
+    ) -> None:
+        with self.write_dict() as d:
+            with d.write_property("@value") as value_prop:
+                value_prop.write(json.dumps(v))
+            with d.write_property("@type") as type_prop:
+                type_prop.write_string(compact_datatype or datatype)
 
     @contextmanager
     def write_property(
@@ -3131,10 +3267,16 @@ try:
             self.subject: Optional[Node] = subject
             self.predicate: Optional[Node] = predicate
 
-        def __add_literal(self, v: Any) -> None:
+        def __add_literal(self, v: Any, datatype: Optional[str] = None) -> None:
             if self.subject is None or self.predicate is None:
                 raise TypeError("Subject and predicate of literal value cannot be None")
-            self.graph.add((self.subject, self.predicate, Literal(v)))
+            self.graph.add(
+                (
+                    self.subject,
+                    self.predicate,
+                    Literal(v, datatype=URIRef(datatype) if datatype else None),
+                )
+            )
 
         def __add_uriref(self, v: str) -> None:
             if self.subject is None or self.predicate is None:
@@ -3161,6 +3303,20 @@ try:
 
         def write_float(self, v: float) -> None:
             self.__add_literal(v)
+
+        def write_double(self, v: float) -> None:
+            self.__add_literal(v)
+
+        def write_iri_ref(self, v: str, compact: Optional[str] = None) -> None:
+            self.__add_uriref(v)
+
+        def write_typed_literal(
+            self,
+            v: Union[str, int, float, bool],
+            datatype: str,
+            compact_datatype: Optional[str] = None,
+        ) -> None:
+            self.__add_literal(v, datatype)
 
         @contextmanager
         def write_property(
