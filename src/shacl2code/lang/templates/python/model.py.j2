@@ -1847,9 +1847,7 @@ def _encode_ext_value(
                                 ) as prop_s,
                                 path.push_path(iri) as prop_path,
                             ):
-                                _encode_ext_value(
-                                    prop_s, v, state, prop_path, context
-                                )
+                                _encode_ext_value(prop_s, v, state, prop_path, context)
                 elif isinstance(i, SHACLObject):
                     if state.is_written(i):
                         # A reference in an extensible property must be
@@ -2468,8 +2466,7 @@ class SHACLObjectSet(object):
             # If we are making a list add all the objects referred to by reference
             # to the list
             objects = list(
-                self.objects
-                | {o for o in state.ref_objects if not _inline_only(o)}
+                self.objects | {o for o in state.ref_objects if not _inline_only(o)}
             )
         else:
             objects = list(self.objects)
@@ -2539,7 +2536,9 @@ class SHACLObjectSet(object):
 
 def _inline_only(o: SHACLObject) -> bool:
     """True for an extensible object whose type is not a class of the model."""
-    return isinstance(o, SHACLExtensibleObject) and o.get_type() not in SHACLObject.CLASSES
+    return (
+        isinstance(o, SHACLExtensibleObject) and o.get_type() not in SHACLObject.CLASSES
+    )
 
 
 class EncodeState(object):
@@ -3936,9 +3935,7 @@ try:
                 # so that they are first reached through them. Those read
                 # as node objects there are not top-level objects
                 deferred = sorted(unknown_types, key=str) + list(blank_nodes)
-                referenced = [
-                    s for s in deferred if (None, None, s) in self.graph
-                ]
+                referenced = [s for s in deferred if (None, None, s) in self.graph]
                 for s in deferred:
                     if (None, None, s) not in self.graph:
                         self.nodes.objects.add(s)
