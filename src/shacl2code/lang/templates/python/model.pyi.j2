@@ -370,10 +370,12 @@ class EncodeState:
     ref_objects: Set[SHACLObject]
     written_objects: Set[SHACLObject]
     blank_objects: Dict[SHACLObject, str]
+    blank_ids: Dict[str, str]
     objectset: SHACLObjectSet
 
     def __init__(self, objectset: SHACLObjectSet) -> None: ...
     def get_object_id(self, o: SHACLObject) -> str: ...
+    def get_blank_id(self, _id: str) -> str: ...
     def is_refed(self, o: SHACLObject) -> bool: ...
     def add_refed(self, o: SHACLObject) -> None: ...
     def is_written(self, o: SHACLObject) -> bool: ...
@@ -385,6 +387,7 @@ class EncodeState:
 class DecodeState:
     objectset: SHACLObjectSet
     read_objs: Dict[str, SHACLObject]
+    ranges: Dict[str, Type[SHACLObject]]
 
     def __init__(self, objectset: SHACLObjectSet) -> None: ...
     def expand_iri(self, iri: str, default: Optional[str] = None) -> Optional[str]: ...
@@ -412,13 +415,13 @@ class Encoder(ABC):
     def write_lang_string(
         self,
         v: str,
-        language: str,
+        language: Optional[str],
         direction: Optional[str] = None,
     ) -> None: ...
     def write_node_object(
         self,
-        typ: Optional[str],
-        compact_type: Optional[str],
+        typ: Union[None, str, Tuple[str, ...]],
+        compact_type: Union[None, str, Tuple[str, ...]],
         _id: Optional[str],
         compact_id: Optional[str],
     ) -> Iterator[Encoder]: ...
@@ -535,13 +538,17 @@ class TypedLiteral:
 @dataclass(frozen=True)
 class LangString:
     value: str
-    language: str
+    language: Optional[str]
     direction: Optional[str] = None
+
+    def __post_init__(self) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __hash__(self) -> int: ...
 
 
 @dataclass(frozen=True)
 class NodeObject:
-    type: Optional[str] = None
+    type: Union[None, str, Tuple[str, ...]] = None
     id: Optional[str] = None
     properties: Dict[str, Any] = field(default_factory=dict, hash=False)
 

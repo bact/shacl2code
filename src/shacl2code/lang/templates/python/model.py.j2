@@ -516,6 +516,8 @@ class ObjectProp(IRIProp[Union[str, "SHACLObject"]]):
             raise DecodeError(path, "IRI cannot be None")
 
         iri = self.expand(iri) or state.expand_iri(iri) or iri
+        # The class an object with this IRI must have, for decoding it later
+        state.ranges.setdefault(iri, self.cls)
 
         if state.objectset is None:
             return iri
@@ -1413,14 +1415,28 @@ class SHACLObject(metaclass=SHACLObjectMeta):
 
                 last_error: Optional[PathError] = None
                 for t in possible:
-                    # Objects registered by a failed attempt must not be
-                    # returned by the next attempt
-                    read_objs = dict(state.read_objs)
+                    # Objects read or indexed by a failed attempt must not be
+                    # returned by the next attempt, so each attempt decodes
+                    # into a scratch state
+                    scratch = SHACLObjectSet()
+                    scratch.context = state.objectset.context
+                    scratch_state = DecodeState(scratch)
+                    scratch_state.read_objs = dict(state.read_objs)
+                    scratch_state.ranges = dict(state.ranges)
                     try:
-                        return SHACLObject.decode(decoder, state, path, t)
+                        o = SHACLObject.decode(decoder, scratch_state, path, t)
                     except (ValidationError, DecodeError) as e:
-                        state.read_objs = read_objs
                         last_error = e
+                        continue
+
+                    state.read_objs = scratch_state.read_objs
+                    state.ranges = scratch_state.ranges
+                    indexed = {
+                        i for objs in scratch.obj_by_type.values() for _, i in objs
+                    }
+                    for i in sorted(indexed, key=SHACLObject._sort_key):
+                        state.objectset.add_index(i)
+                    return o
 
                 raise DecodeError(
                     path,
@@ -1578,7 +1594,11 @@ class IRIRef:
     An IRI reference value of an extensible property
 
     Serialized in JSON-LD as a node reference (e.g. `{"@id": "http://..."}`)
-    and in RDF as an IRI node, or a blank node if `iri` starts with `_:`
+    and in RDF as an IRI node, or a blank node if `iri` starts with `_:`.
+
+    When an object set is linked, a reference to an object of the set is
+    replaced by that object. Blank node identifiers are relabeled when
+    written, consistently with those of objects and node objects
     """
 
     iri: str
@@ -1623,12 +1643,35 @@ class LangString:
     `{"@value": "chat", "@language": "fr"}`) and in RDF as a language-tagged
     literal. The base `direction` ("ltr" or "rtl") is only represented in
     JSON-LD; it is dropped when writing RDF, as the JSON-LD to RDF algorithm
-    does by default
+    does by default. `language` may only be `None` if `direction` is set (a
+    string with only a base direction), which is a plain string in RDF.
+
+    Language tags are compared case-insensitively
     """
 
     value: str
-    language: str
+    language: Optional[str]
     direction: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.language is None and self.direction is None:
+            raise TypeError("LangString must have a language or a direction")
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, LangString):
+            return NotImplemented
+        return (
+            self.value == other.value
+            and _lower(self.language) == _lower(other.language)
+            and self.direction == other.direction
+        )
+
+    def __hash__(self) -> int:
+        return hash((self.value, _lower(self.language), self.direction))
+
+
+def _lower(s: Optional[str]) -> Optional[str]:
+    return s.lower() if s is not None else None
 
 
 @dataclass(frozen=True, **_DC_KWARGS)
@@ -1638,7 +1681,8 @@ class NodeObject:
     class of the model (e.g. an object of a class defined by an SPDX custom
     extension)
 
-    `type` is the type IRI, or `None` if the node has no type. `id` is the IRI
+    `type` is the type IRI, a tuple of type IRIs if the node has several
+    types, or `None` if the node has no type. `id` is the IRI
     of the node, a blank node identifier starting with `_:`, or `None` if the
     node has no identifier. `properties` maps each property IRI to its value,
     which follows the same rules as the values of extensible properties: a
@@ -1658,15 +1702,22 @@ class NodeObject:
     an equal `NodeObject` at each place, and written in full at each place.
     When reading RDF, a blank node referenced only once gets no `id`, and a
     blank node referenced more than once keeps its blank node identifier, so
-    that it is written back as one node.
+    that it is written back as one node. Blank node identifiers are relabeled
+    when written, so the same identifier gets the same new label, and never
+    collides with the label of another node.
     """
 
-    type: Optional[str] = None
+    type: Union[None, str, Tuple[str, ...]] = None
     id: Optional[str] = None
     properties: Dict[str, Any] = field(default_factory=dict, hash=False)
 
     def __post_init__(self) -> None:
-        if self.type is not None and not isinstance(self.type, str):
+        if isinstance(self.type, list):
+            object.__setattr__(self, "type", tuple(self.type))
+        if isinstance(self.type, tuple):
+            if not all(isinstance(t, str) for t in self.type):
+                raise TypeError(f"NodeObject types must be strings. Got {self.type!r}")
+        elif self.type is not None and not isinstance(self.type, str):
             raise TypeError(f"NodeObject type must be a string. Got {self.type!r}")
         if self.id is not None and not isinstance(self.id, str):
             raise TypeError(f"NodeObject id must be a string. Got {self.id!r}")
@@ -1689,6 +1740,23 @@ def _ext_objects(value: Any) -> Iterator["SHACLObject"]:
                 yield from _ext_objects(p)
 
 
+def _link_ext_value(value: Any, objectset: "SHACLObjectSet") -> Any:
+    """
+    Replaces each `IRIRef` in a value of an extensible property, including
+    in the properties of node objects, that is the ID of an object of the
+    object set with that object
+    """
+    if isinstance(value, list):
+        return [_link_ext_value(v, objectset) for v in value]
+    if isinstance(value, IRIRef):
+        o = objectset.find_by_id(value.iri)
+        return o if o is not None else value
+    if isinstance(value, NodeObject):
+        for k, v in value.properties.items():
+            value.properties[k] = _link_ext_value(v, objectset)
+    return value
+
+
 def _xsd_double_lexical(v: float) -> str:
     """Returns the canonical XSD lexical form of a double, e.g. `1.5E0`"""
     if v != v:
@@ -1704,20 +1772,34 @@ def _xsd_double_lexical(v: float) -> str:
     return mantissa + "E" + str(int(exponent))
 
 
-def _jsonld_lexical(v: Union[str, int, float, bool]) -> str:
+def _jsonld_lexical(
+    v: Union[str, int, float, bool], datatype: Optional[str] = None
+) -> str:
     """
-    Returns the lexical form of a JSON-LD native value, as the JSON-LD to RDF
-    algorithm does
+    Returns the lexical form of a JSON-LD native value with the given
+    datatype, as the JSON-LD to RDF algorithm does
     """
     if isinstance(v, str):
         return v
     if isinstance(v, bool):
         return "true" if v else "false"
+    if datatype == _XSD_DOUBLE:
+        return _xsd_double_lexical(float(v))
     if isinstance(v, int) and abs(v) < 10**21:
         return str(v)
     if isinstance(v, float) and v.is_integer() and abs(v) < 1e21:
         return str(int(v))
     return _xsd_double_lexical(float(v))
+
+
+def _jsonld_native(v: Any) -> Any:
+    """
+    Returns a native JSON value as JSON-LD reads it: a number without a
+    fractional part (e.g. `5.0`) is an xsd:integer, so is read as an `int`
+    """
+    if isinstance(v, float) and v.is_integer() and abs(v) < 1e21:
+        return int(v)
+    return v
 
 
 def _literal_value(lexical: str, datatype: str) -> Any:
@@ -1789,6 +1871,16 @@ def _compact_prefix(context: Dict[str, str], iri: str, vocab: bool) -> str:
     return best
 
 
+def _expand_context(objectset: Optional["SHACLObjectSet"]) -> Dict[str, str]:
+    """
+    Returns the terms used to expand IRIs: the terms of the static context and
+    of the local context of the object set
+    """
+    if objectset is None or not objectset.context:
+        return _STATIC_CONTEXT
+    return {**_STATIC_CONTEXT, **objectset.context}
+
+
 def _describe_jsonld_form(v: Dict[Any, Any]) -> str:
     """Names the (unsupported) JSON-LD form of a dictionary"""
     keys = sorted(str(k) for k in v.keys())
@@ -1817,11 +1909,20 @@ def _encode_ext_value(
                 elif isinstance(i, str):
                     item_s.write_string(i)
                 elif isinstance(i, int):
-                    item_s.write_integer(i)
+                    if abs(i) < 10**21:
+                        item_s.write_integer(i)
+                    else:
+                        # JSON-LD reads such a number as xsd:double
+                        item_s.write_double(float(i))
                 elif isinstance(i, float):
                     item_s.write_double(i)
                 elif isinstance(i, IRIRef):
-                    item_s.write_iri_ref(i.iri, _compact_prefix(context, i.iri, False))
+                    if is_blank_node(i.iri):
+                        item_s.write_iri_ref(state.get_blank_id(i.iri))
+                    else:
+                        item_s.write_iri_ref(
+                            i.iri, _compact_prefix(context, i.iri, False)
+                        )
                 elif isinstance(i, TypedLiteral):
                     try:
                         item_s.write_typed_literal(
@@ -1834,16 +1935,26 @@ def _encode_ext_value(
                 elif isinstance(i, LangString):
                     item_s.write_lang_string(i.value, i.language, i.direction)
                 elif isinstance(i, NodeObject):
+                    compact_type: Union[None, str, Tuple[str, ...]] = None
+                    if isinstance(i.type, tuple):
+                        compact_type = tuple(
+                            _compact_prefix(context, t, True) for t in i.type
+                        )
+                    elif i.type:
+                        compact_type = _compact_prefix(context, i.type, True)
+                    _id = i.id
+                    compact_id = None
+                    if _id and is_blank_node(_id):
+                        _id = state.get_blank_id(_id)
+                    elif _id:
+                        compact_id = _compact_prefix(context, _id, False)
                     with item_s.write_node_object(
-                        i.type,
-                        state.compact_iri(i.type) if i.type else None,
-                        i.id,
-                        _compact_prefix(context, i.id, False) if i.id else None,
+                        i.type, compact_type, _id, compact_id
                     ) as node_s:
                         for iri, v in i.properties.items():
                             with (
                                 node_s.write_property(
-                                    iri, state.compact_iri(iri)
+                                    iri, _compact_prefix(context, iri, True)
                                 ) as prop_s,
                                 path.push_path(iri) as prop_path,
                             ):
@@ -1907,20 +2018,30 @@ class SHACLExtensibleObject(SHACLObject):
     def _decode_properties(
         self, decoder: Decoder, state: DecodeState, path: DataPath
     ) -> None:
-        context = state.objectset.context if state.objectset else {}
+        context = _expand_context(state.objectset)
         # IDs of the node objects being decoded, to stop at cycles
         decoding: Set[str] = set()
 
         def decode_node(node_d: Decoder, path: DataPath) -> Any:
             typ, obj_d = node_d.read_object()
+            node_type: Union[None, str, Tuple[str, ...]] = None
             if typ is not None:
-                if not isinstance(typ, str):
-                    raise DecodeError(
-                        path, f"Node object type must be a string. Got {typ!r}"
-                    )
-                typ = state.expand_iri(typ) or typ
-                if typ in SHACLObject.CLASSES:
-                    return SHACLObject.decode(node_d, state, path)
+                types = typ if isinstance(typ, list) else [typ]
+                for t in types:
+                    if not isinstance(t, str):
+                        raise DecodeError(
+                            path, f"Node object type must be a string. Got {t!r}"
+                        )
+                if isinstance(typ, str):
+                    if (state.expand_iri(typ) or typ) in SHACLObject.CLASSES or (
+                        _expand_prefix(context, typ, True) in SHACLObject.CLASSES
+                    ):
+                        return SHACLObject.decode(node_d, state, path)
+                    node_type = _expand_prefix(context, typ, True)
+                else:
+                    node_type = tuple(_expand_prefix(context, t, True) for t in types)
+                    if len(node_type) == 1:
+                        node_type = node_type[0]
 
             _id = obj_d.read_object_id("{{ context.compact_iri('@id') }}")
             if _id is not None:
@@ -1929,6 +2050,9 @@ class SHACLExtensibleObject(SHACLObject):
                         path, f"Node object '@id' must be a string. Got {_id!r}"
                     )
                 _id = _expand_prefix(context, _id, False)
+                if _id in state.read_objs:
+                    # The same node as an object that is already read
+                    return state.read_objs[_id]
                 if _id in decoding:
                     return IRIRef(_id)
                 decoding.add(_id)
@@ -1939,7 +2063,7 @@ class SHACLExtensibleObject(SHACLObject):
                     if key in ("@id", "{{ context.compact_iri('@id') }}"):
                         continue
 
-                    expanded_key = state.expand_iri(key) or key
+                    expanded_key = _expand_prefix(context, key, True)
                     if not is_IRI(expanded_key):
                         raise DecodeError(
                             path,
@@ -1959,7 +2083,7 @@ class SHACLExtensibleObject(SHACLObject):
                 if _id is not None:
                     decoding.discard(_id)
 
-            return NodeObject(typ, _id, properties)
+            return NodeObject(node_type, _id, properties)
 
         def decode_value(d: Decoder, path: DataPath) -> Any:
             if not d.is_list():
@@ -2001,7 +2125,7 @@ class SHACLExtensibleObject(SHACLObject):
             if key is None:
                 raise DecodeError(path, "Property key cannot be None")
 
-            expanded_key = state.expand_iri(key) or key
+            expanded_key = _expand_prefix(context, key, True)
 
             if not is_IRI(expanded_key):
                 raise DecodeError(
@@ -2030,7 +2154,9 @@ class SHACLExtensibleObject(SHACLObject):
                 continue
 
             with (
-                encoder.write_property(iri, state.compact_iri(iri)) as prop_s,
+                encoder.write_property(
+                    iri, _compact_prefix(context, iri, True)
+                ) as prop_s,
                 path.push_path(iri) as prop_path,
             ):
                 _encode_ext_value(prop_s, value, state, prop_path, context)
@@ -2079,9 +2205,14 @@ class SHACLExtensibleObject(SHACLObject):
 
         super().link_helper(objectset, missing, visited, path)
 
-        for iri, value in self._ext_data.items():
+        for iri, value in list(self._ext_data.items()):
             if iri in self._OBJ_IRI_PROPS:
                 continue
+            # A reference to an object of the object set is replaced by the
+            # object, so that it still refers to it when the object's blank
+            # node ID is relabeled on writing
+            value = _link_ext_value(value, objectset)
+            self._ext_data[iri] = value
             with path.push_path(iri) as prop_path:
                 for o in _ext_objects(value):
                     o.link_helper(objectset, missing, visited, prop_path)
@@ -2402,13 +2533,10 @@ class SHACLObjectSet(object):
         self.walk(walk_callback)
 
         new_objects: Set[SHACLObject] = set()
+        inline_only: List[SHACLObject] = []
         for o in self.objects:
-            # An object whose type is not in the model is written inline
-            # where it is first used, so is only kept in the root if it is
-            # not referenced elsewhere
             if _inline_only(o):
-                if ref_counts[o] == 1:
-                    new_objects.add(o)
+                inline_only.append(o)
             elif is_IRI(o._id):
                 new_objects.add(o)
             # If the object is a blank node and is only referenced by this
@@ -2418,6 +2546,30 @@ class SHACLObjectSet(object):
             # therefore must be kept
             elif ref_counts[o] != 2:
                 new_objects.add(o)
+
+        # An object whose type is not in the model is written inline where it
+        # is first used, so is only kept in the root if it is not reached
+        # from another root object
+        reached: Set[SHACLObject] = set()
+
+        def reach(o: SHACLObject) -> None:
+            def callback(value: Any, path: DataPath) -> bool:
+                if not isinstance(value, SHACLObject) or value in reached:
+                    return False
+                reached.add(value)
+                return True
+
+            for c in o.iter_objects():
+                c.walk(callback, DataPath())
+
+        for o in new_objects:
+            reach(o)
+
+        inline_only.sort(key=lambda o: (ref_counts[o] != 1, SHACLObject._sort_key(o)))
+        for o in inline_only:
+            if o not in reached:
+                new_objects.add(o)
+                reach(o)
 
         self.objects = new_objects
 
@@ -2507,8 +2659,19 @@ class SHACLObjectSet(object):
         self.create_index()
         path = DataPath()
         for idx, obj_d in enumerate(decoder.read_list()):
+            # An object of a type that is not in the model is decoded with the
+            # class of the range of a property that references it, if any.
+            # Decoders yield such objects last for this
+            target_type = None
+            typ, _ = obj_d.read_object() if obj_d.is_object() else (None, None)
+            if isinstance(typ, str) and (
+                (self.expand_iri(typ) or typ) not in SHACLObject.CLASSES
+            ):
+                _id = obj_d.read_object_id("{{ context.compact_iri('@id') }}")
+                if isinstance(_id, str):
+                    target_type = state.ranges.get(self.expand_iri(_id) or _id)
             with path.push_index(idx) as obj_path:
-                o = SHACLObject.decode(obj_d, state, obj_path)
+                o = SHACLObject.decode(obj_d, state, obj_path, target_type)
             self.objects.add(o)
 
         self._link()
@@ -2548,17 +2711,35 @@ class EncodeState(object):
         self.ref_objects: Set[SHACLObject] = set()
         self.written_objects: Set[SHACLObject] = set()
         self.blank_objects: Dict[SHACLObject, str] = {}
+        self.blank_ids: Dict[str, str] = {}
         self.objectset = objectset
+
+    def __new_blank_id(self, prefix: str) -> str:
+        # Labels are numbered across objects and other blank nodes, so never
+        # collide
+        return f"_:{prefix}{len(self.blank_objects) + len(self.blank_ids)}"
 
     def get_object_id(self, o: SHACLObject) -> str:
         if o._id:
             return o._id
 
         if o not in self.blank_objects:
-            _id = f"_:{o.__class__.__name__}{len(self.blank_objects)}"
-            self.blank_objects[o] = _id
+            self.blank_objects[o] = self.__new_blank_id(o.__class__.__name__)
 
         return self.blank_objects[o]
+
+    def get_blank_id(self, _id: str) -> str:
+        """
+        Returns the label to write for the blank node identifier of a value
+        (e.g. the ID of a `NodeObject`, or an `IRIRef` to it)
+
+        Blank node identifiers are relabeled like those of objects, so the
+        same identifier always gets the same new label, and labels never
+        collide with those of objects
+        """
+        if _id not in self.blank_ids:
+            self.blank_ids[_id] = self.__new_blank_id("BlankNode")
+        return self.blank_ids[_id]
 
     def is_refed(self, o: SHACLObject) -> bool:
         return o in self.ref_objects
@@ -2589,6 +2770,9 @@ class DecodeState(object):
     def __init__(self, objectset: SHACLObjectSet):
         self.objectset = objectset
         self.read_objs: Dict[str, SHACLObject] = {}
+        # Classes of the ranges of the properties that reference an object
+        # by its IRI
+        self.ranges: Dict[str, Type[SHACLObject]] = {}
 
     def expand_iri(self, iri: str, default: Optional[str] = None) -> Optional[str]:
         if self.objectset:
@@ -2797,10 +2981,12 @@ class JSONLDDecoder(Decoder):
     def __init__(self, data: Any, root: bool = False) -> None:
         self.data = data
         self.root = root
+        # The list is the top-level list of objects (e.g. @graph)
+        self.objects_list = False
 
     def read_value(self) -> Optional[Any]:
         if not isinstance(self.data, dict):
-            return self.data
+            return _jsonld_native(self.data)
 
         id_keys = ("@id", "{{ context.compact_iri('@id') }}")
         type_keys = ("@type", "{{ context.compact_iri('@type') }}")
@@ -2863,18 +3049,15 @@ class JSONLDDecoder(Decoder):
                 raise TypeError(
                     f"Value object '@direction' must be 'ltr' or 'rtl'. Got {direction!r}"
                 )
-            if language is None:
-                # A base direction without a language is not supported
-                return self.data
             return LangString(value, language, direction)
 
         if not isinstance(value, (str, int, float, bool)):
             raise TypeError(f"Value object '@value' must be a scalar. Got {value!r}")
 
         if typ is None:
-            return value
+            return _jsonld_native(value)
 
-        return TypedLiteral(_jsonld_lexical(value), typ)
+        return TypedLiteral(_jsonld_lexical(value, typ), typ)
 
     def read_string(self) -> Optional[str]:
         if isinstance(self.data, str):
@@ -2911,12 +3094,35 @@ class JSONLDDecoder(Decoder):
 
     def read_list(self) -> Iterator["JSONLDDecoder"]:
         if self.is_list():
-            for v in self.data:
+            data = self.data
+            if isinstance(data, dict):
+                # A set object is the same as an array
+                data = data["@set"]
+                if data is None:
+                    data = []
+                elif not isinstance(data, list):
+                    data = [data]
+            if self.objects_list:
+                # Yield objects of types that are not in the model last, so
+                # that they are first reached through a property whose range
+                # tells which class to use for them
+                type_keys = ("@type", "{{ context.compact_iri('@type') }}")
+
+                def known(v: Any) -> bool:
+                    if not isinstance(v, dict):
+                        return True
+                    typ = next((v[k] for k in type_keys if k in v), None)
+                    return not isinstance(typ, str) or typ in SHACLObject.CLASSES
+
+                data = [v for v in data if known(v)] + [v for v in data if not known(v)]
+            for v in data:
                 yield self.__class__(v)
         else:
             yield self
 
     def is_list(self) -> bool:
+        if isinstance(self.data, dict):
+            return "@set" in self.data and set(self.data.keys()) <= {"@set", "@index"}
         return isinstance(self.data, (list, tuple, set))
 
     def __get_value(self, *keys: Optional[str]) -> Optional[Any]:
@@ -2972,8 +3178,7 @@ class JSONLDDecoder(Decoder):
                 return None
 
         typ = self.__get_value(*type_keys)
-        if typ is not None and not isinstance(typ, str):
-            # Several types are not supported
+        if typ is not None and not isinstance(typ, (str, list)):
             return None
 
         return self
@@ -3010,6 +3215,7 @@ class JSONLDDeserializer(object):
                     if k in {"@graph", "@context", _JSS_SIGNATURE}:
                         continue
                     raise KeyError(f"Unexpected property '{k}'")
+                graph_prop.objects_list = True
                 objectset.decode(graph_prop, state)
             else:
                 objectset.decode(h, state)
@@ -3144,7 +3350,7 @@ class Encoder(ABC):
     def write_lang_string(
         self,
         v: str,
-        language: str,
+        language: Optional[str],
         direction: Optional[str] = None,
     ) -> None:
         """
@@ -3152,7 +3358,8 @@ class Encoder(ABC):
 
         Encodes the string as a literal with a language tag and optional base
         direction ("ltr" or "rtl"). Serializations that cannot represent the
-        base direction should drop it
+        base direction should drop it. The language is `None` for a string
+        with only a base direction
 
         The default implementation raises `NotImplementedError`
         """
@@ -3163,8 +3370,8 @@ class Encoder(ABC):
     @contextmanager
     def write_node_object(
         self,
-        typ: Optional[str],
-        compact_type: Optional[str],
+        typ: Union[None, str, Tuple[str, ...]],
+        compact_type: Union[None, str, Tuple[str, ...]],
         _id: Optional[str],
         compact_id: Optional[str],
     ) -> Iterator["Encoder"]:
@@ -3175,7 +3382,8 @@ class Encoder(ABC):
         the properties of a node object that is not a `SHACLObject` (e.g. an
         object of a class that is not in the model, in an extensible
         property). Unlike `write_object`, the node object is written in place
-        and has no type if `typ` is `None`, and no ID if `_id` is `None`. The
+        and has no type if `typ` is `None`, several types if `typ` is a tuple,
+        and no ID if `_id` is `None`. The
         ID is either a fully qualified IRI or a blank node IRI. If
         `compact_type` or `compact_id` is provided and the serialization
         supports compacted IRIs, it should be preferred to the full IRI
@@ -3339,23 +3547,29 @@ class JSONLDEncoder(Encoder):
     def write_lang_string(
         self,
         v: str,
-        language: str,
+        language: Optional[str],
         direction: Optional[str] = None,
     ) -> None:
-        self.data = {"@value": v, "@language": language}
+        self.data = {"@value": v}
+        if language is not None:
+            self.data["@language"] = language
         if direction is not None:
             self.data["@direction"] = direction
 
     @contextmanager
     def write_node_object(
         self,
-        typ: Optional[str],
-        compact_type: Optional[str],
+        typ: Union[None, str, Tuple[str, ...]],
+        compact_type: Union[None, str, Tuple[str, ...]],
         _id: Optional[str],
         compact_id: Optional[str],
     ) -> Iterator["JSONLDEncoder"]:
         with self.write_dict() as obj_dict:
-            if typ:
+            if isinstance(typ, tuple):
+                obj_dict.data["{{ context.compact_iri('@type') }}"] = list(
+                    compact_type or typ
+                )
+            elif typ:
                 obj_dict.data["{{ context.compact_iri('@type') }}"] = (
                     compact_type or typ
                 )
@@ -3565,14 +3779,15 @@ class JSONLDInlineEncoder(Encoder):
     def write_lang_string(
         self,
         v: str,
-        language: str,
+        language: Optional[str],
         direction: Optional[str] = None,
     ) -> None:
         with self.write_dict() as d:
             with d.write_property("@value") as value_prop:
                 value_prop.write_string(v)
-            with d.write_property("@language") as language_prop:
-                language_prop.write_string(language)
+            if language is not None:
+                with d.write_property("@language") as language_prop:
+                    language_prop.write_string(language)
             if direction is not None:
                 with d.write_property("@direction") as direction_prop:
                     direction_prop.write_string(direction)
@@ -3580,17 +3795,30 @@ class JSONLDInlineEncoder(Encoder):
     @contextmanager
     def write_node_object(
         self,
-        typ: Optional[str],
-        compact_type: Optional[str],
+        typ: Union[None, str, Tuple[str, ...]],
+        compact_type: Union[None, str, Tuple[str, ...]],
         _id: Optional[str],
         compact_id: Optional[str],
     ) -> Iterator["JSONLDInlineEncoder"]:
         with self.write_dict() as obj_dict:
-            if typ:
+            if isinstance(typ, tuple):
+                with (
+                    obj_dict.write_property(
+                        "{{ context.compact_iri('@type') }}"
+                    ) as type_prop,
+                    type_prop.write_list() as type_list,
+                ):
+                    types = compact_type if isinstance(compact_type, tuple) else typ
+                    for t in types:
+                        with type_list.write_list_item() as type_item:
+                            type_item.write_string(t)
+            elif typ:
                 with obj_dict.write_property(
                     "{{ context.compact_iri('@type') }}"
                 ) as type_prop:
-                    type_prop.write_string(compact_type or typ)
+                    type_prop.write_string(
+                        compact_type if isinstance(compact_type, str) else typ
+                    )
 
             if _id:
                 with obj_dict.write_property("@id") as id_prop:
@@ -3776,6 +4004,7 @@ try:
             self.nodes = nodes if nodes is not None else _RDFDecodedNodes()
             # The subject is a blank node that needs no identifier
             self.anonymous = anonymous
+            self.node_object = False
 
         def __decoder(
             self,
@@ -3783,8 +4012,9 @@ try:
             predicate: Optional[Node] = None,
             value: Optional[Node] = None,
             anonymous: bool = False,
+            node_object: bool = False,
         ) -> "RDFDecoder":
-            return self.__class__(
+            d = self.__class__(
                 self.graph,
                 subject,
                 predicate,
@@ -3792,6 +4022,10 @@ try:
                 nodes=self.nodes,
                 anonymous=anonymous,
             )
+            # The subject is read as a node object, so all of its types are
+            # read
+            d.node_object = node_object
+            return d
 
         def __read_node(self) -> Optional[Node]:
             if self.value is not None:
@@ -3836,32 +4070,24 @@ try:
             types = list(self.graph.objects(v, RDF.type))
             if any(str(t) in SHACLObject.CLASSES for t in types):
                 # An object of the model. An IRI is a reference to a
-                # top-level object, but a blank node is read in place
-                if isinstance(v, BNode):
+                # top-level object, but a blank node with one type is read
+                # in place
+                if isinstance(v, URIRef):
+                    return None
+                if len(types) == 1:
                     return self.__decoder(v)
-                return None
 
-            if (
-                len(types) > 1
-                or (v, None, None) not in self.graph
-                or v in self.nodes.objects
-            ):
-                # Several types cannot be represented, and a node without
-                # properties, or that is read as a top-level object, is a
-                # node reference
+            if (v, None, None) not in self.graph or v in self.nodes.objects:
+                # A node without properties, or that is read as a top-level
+                # object, is a node reference
                 return None
 
             anonymous = (
                 isinstance(v, BNode)
                 and len(list(self.graph.subject_predicates(v, unique=True))) < 2
             )
-            if anonymous and v in self.nodes.node_objects:
-                # A blank node referenced once that is reached again is in a
-                # cycle
-                return None
-
             self.nodes.node_objects.add(v)
-            return self.__decoder(v, anonymous=anonymous)
+            return self.__decoder(v, anonymous=anonymous, node_object=True)
 
         def read_string(self) -> Optional[str]:
             v = self.__read_literal()
@@ -3985,6 +4211,11 @@ try:
             if s is None:
                 s = self.subject
 
+            if self.node_object and s == self.subject:
+                types = sorted(str(t) for t in self.graph.objects(s, RDF.type))
+                if len(types) > 1:
+                    return types, self
+
             typ = self.graph.value(s, RDF.type)
             if typ is None:
                 return None, self
@@ -3993,7 +4224,9 @@ try:
                 raise TypeError(f"Type value is of unknown type {type(typ)}")
 
             return typ.toPython(), self.__decoder(
-                s, anonymous=self.anonymous and s == self.subject
+                s,
+                anonymous=self.anonymous and s == self.subject,
+                node_object=self.node_object and s == self.subject,
             )
 
         def read_object_id(self, alias: Optional[str] = None) -> Optional[Any]:
@@ -4051,7 +4284,10 @@ try:
             self.__add_literal(v)
 
         def write_iri(self, v: str, compact: Optional[str] = None) -> None:
-            self.__add_uriref(v)
+            if v.startswith("_:"):
+                self.__add_node(BNode(v[2:]))
+            else:
+                self.__add_uriref(v)
 
         def write_enum(self, v: str, e: Any, compact: Optional[str] = None) -> None:
             self.__add_uriref(v)
@@ -4092,18 +4328,18 @@ try:
         def write_lang_string(
             self,
             v: str,
-            language: str,
+            language: Optional[str],
             direction: Optional[str] = None,
         ) -> None:
             # RDF 1.1 literals have no base direction. It is dropped, as the
             # JSON-LD to RDF algorithm does by default
-            self.__add_node(Literal(v, lang=language))
+            self.__add_node(Literal(v, lang=language) if language else Literal(v))
 
         @contextmanager
         def write_node_object(
             self,
-            typ: Optional[str],
-            compact_type: Optional[str],
+            typ: Union[None, str, Tuple[str, ...]],
+            compact_type: Union[None, str, Tuple[str, ...]],
             _id: Optional[str],
             compact_id: Optional[str],
         ) -> Iterator["RDFEncoder"]:
@@ -4116,8 +4352,8 @@ try:
                 node = URIRef(_id)
 
             self.__add_node(node)
-            if typ:
-                self.graph.add((node, RDF.type, URIRef(typ)))
+            for t in typ if isinstance(typ, tuple) else [typ] if typ else []:
+                self.graph.add((node, RDF.type, URIRef(t)))
             yield self.__class__(self.graph, node)
 
         @contextmanager
@@ -4189,6 +4425,18 @@ CONTEXT_URLS: List[str] = [
     "{{ url }}",
 {%- endfor %}
 ]
+
+# Terms of the static context that are IRIs, used to expand compact IRIs in
+# extensible properties. Later contexts override earlier ones
+_STATIC_CONTEXT: Dict[str, str] = dict([
+{%- for c in context.contexts %}
+{%- for k, v in c.items() %}
+{%- if v is string and not k.startswith("@") and not v.startswith("@") %}
+    ({{ k | tojson }}, {{ v | tojson }}),
+{%- endif %}
+{%- endfor %}
+{%- endfor %}
+])
 
 # ONTOLOGIES
 {%- for o in ontologies %}
