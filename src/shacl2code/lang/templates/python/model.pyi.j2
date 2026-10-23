@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from abc import ABC
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import (
@@ -415,6 +415,13 @@ class Encoder(ABC):
         language: str,
         direction: Optional[str] = None,
     ) -> None: ...
+    def write_node_object(
+        self,
+        typ: Optional[str],
+        compact_type: Optional[str],
+        _id: Optional[str],
+        compact_id: Optional[str],
+    ) -> Iterator[Encoder]: ...
     def write_object(
         self,
         typ: str,
@@ -449,6 +456,7 @@ class Decoder(ABC):
     def is_object(self) -> bool: ...
     def object_keys(self) -> Iterator[str]: ...
     def read_object_id(self, alias: Optional[str] = None) -> Optional[Any]: ...
+    def read_node_object(self) -> Optional[Decoder]: ...
 
 
 class SHACLObjectMeta(type):
@@ -529,6 +537,15 @@ class LangString:
     value: str
     language: str
     direction: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class NodeObject:
+    type: Optional[str] = None
+    id: Optional[str] = None
+    properties: Dict[str, Any] = field(default_factory=dict, hash=False)
+
+    def __post_init__(self) -> None: ...
 
 
 class SHACLExtensibleObject(SHACLObject):

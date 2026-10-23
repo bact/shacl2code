@@ -2332,9 +2332,9 @@ def test_extensible_value_objects_invalid(model, test_context_url, value):
         pytest.param({"@list": [1, 2]}, "@list", id="list object"),
         pytest.param({"@set": [1, 2]}, "@set", id="set object"),
         pytest.param(
-            {"@id": EXT_PREFIX + "x", EXT_PREFIX + "p": "v"},
+            {"@type": [EXT_PREFIX + "a", EXT_PREFIX + "b"], EXT_PREFIX + "p": "v"},
             "node object",
-            id="embedded node object",
+            id="node object with several types",
         ),
         pytest.param(
             {"@value": "a", "@direction": "ltr"}, "@direction", id="direction only"
@@ -2415,6 +2415,359 @@ def test_extensible_value_objects_rdf_roundtrip(model, test_context_url):
         d[EXT_PREFIX + "multi-iri-prop"].sort(key=lambda v: v["@id"])
 
     assert actual == expect
+
+
+def sort_lists(v):
+    """Sort all lists in a JSON value, as RDF does not preserve value order"""
+    if isinstance(v, dict):
+        return {k: sort_lists(i) for k, i in v.items()}
+    if isinstance(v, list):
+        return sorted(
+            (sort_lists(i) for i in v), key=lambda i: json.dumps(i, sort_keys=True)
+        )
+    return v
+
+
+NODE_DATA_PROPS = {
+    # A list of several node objects, as in SPDX custom extensions
+    EXT_PREFIX
+    + "metric": [
+        {
+            "@type": EXT_PREFIX + "Metric",
+            EXT_PREFIX + "name": "accuracy",
+            EXT_PREFIX + "value": {"@value": "0.91", "@type": XSD + "decimal"},
+        },
+        {
+            "@type": EXT_PREFIX + "Metric",
+            EXT_PREFIX + "name": "f1",
+            EXT_PREFIX + "value": {"@value": "0.88", "@type": XSD + "decimal"},
+        },
+    ],
+    # A node object with an IRI and nested node objects, two levels deep
+    EXT_PREFIX
+    + "run": {
+        "@type": EXT_PREFIX + "Run",
+        "@id": EXT_PREFIX + "run-1",
+        EXT_PREFIX + "label": {"@value": "essai", "@language": "fr"},
+        EXT_PREFIX + "ref": {"@id": EXT_PREFIX + "iri-value"},
+        EXT_PREFIX
+        + "step": {
+            EXT_PREFIX + "count": 3,
+            EXT_PREFIX
+            + "detail": {"@type": EXT_PREFIX + "Detail", EXT_PREFIX + "ok": True},
+        },
+    },
+}
+
+
+def node_data_expect(data):
+    """The JSON-LD the serializer writes for NODE_DATA_PROPS"""
+
+    def as_lists(v):
+        if isinstance(v, list):
+            return [as_lists(i) for i in v]
+        if isinstance(v, dict) and "@value" not in v and set(v) - {"@id"}:
+            return {
+                k: (
+                    i
+                    if k.startswith("@")
+                    else as_lists(i if isinstance(i, list) else [i])
+                )
+                for k, i in v.items()
+            }
+        return v
+
+    return {
+        k: (
+            as_lists(v if isinstance(v, list) else [v])
+            if k.startswith(EXT_PREFIX)
+            else v
+        )
+        for k, v in data.items()
+    }
+
+
+def test_extensible_node_object(model, test_context_url, tmp_path):
+    # Embedded node objects of types that are not in the model are read as
+    # NodeObject, with their property values read by the same rules as
+    # extensible properties
+    DATA = ext_doc(test_context_url, **NODE_DATA_PROPS)
+    objset, e = ext_value(model, DATA)
+
+    assert e[EXT_PREFIX + "metric"] == [
+        model.NodeObject(
+            EXT_PREFIX + "Metric",
+            properties={
+                EXT_PREFIX + "name": "accuracy",
+                EXT_PREFIX + "value": model.TypedLiteral("0.91", XSD + "decimal"),
+            },
+        ),
+        model.NodeObject(
+            EXT_PREFIX + "Metric",
+            properties={
+                EXT_PREFIX + "name": "f1",
+                EXT_PREFIX + "value": model.TypedLiteral("0.88", XSD + "decimal"),
+            },
+        ),
+    ]
+    run = e[EXT_PREFIX + "run"]
+    assert isinstance(run, model.NodeObject)
+    assert run.type == EXT_PREFIX + "Run"
+    assert run.id == EXT_PREFIX + "run-1"
+    assert run.properties[EXT_PREFIX + "label"] == model.LangString("essai", "fr")
+    assert run.properties[EXT_PREFIX + "ref"] == model.IRIRef(EXT_PREFIX + "iri-value")
+    step = run.properties[EXT_PREFIX + "step"]
+    assert step == model.NodeObject(
+        properties={
+            EXT_PREFIX + "count": 3,
+            EXT_PREFIX
+            + "detail": model.NodeObject(
+                EXT_PREFIX + "Detail", properties={EXT_PREFIX + "ok": True}
+            ),
+        }
+    )
+    # Node objects are values, so are not objects of the object set
+    assert len(objset.objects) == 1
+    assert objset.find_by_id(EXT_PREFIX + "run-1") is None
+
+    expect = node_data_expect(DATA)
+    assert model.JSONLDSerializer().serialize_data(objset) == expect
+
+    assert json.loads(write_inline(model, objset, tmp_path)) == {
+        "@context": test_context_url,
+        "@graph": [{k: v for k, v in expect.items() if k != "@context"}],
+    }
+
+
+def test_extensible_node_object_rdf_roundtrip(model, test_context_url):
+    # JSON-LD -> objects -> RDF -> objects -> JSON-LD must not lose data
+    DATA = ext_doc(test_context_url, **NODE_DATA_PROPS)
+    objset, e = ext_value(model, DATA)
+    expect = model.JSONLDSerializer().serialize_data(objset)
+
+    g = rdflib.Graph()
+    model.RDFSerializer().write(objset, g)
+
+    subject = rdflib.URIRef(EXT_PREFIX + "e")
+    metrics = list(g.objects(subject, rdflib.URIRef(EXT_PREFIX + "metric")))
+    assert len(metrics) == 2
+    for m in metrics:
+        assert isinstance(m, rdflib.BNode)
+        assert g.value(m, rdflib.RDF.type) == rdflib.URIRef(EXT_PREFIX + "Metric")
+    run = g.value(subject, rdflib.URIRef(EXT_PREFIX + "run"))
+    assert run == rdflib.URIRef(EXT_PREFIX + "run-1")
+    assert g.value(run, rdflib.URIRef(EXT_PREFIX + "label")) == rdflib.Literal(
+        "essai", lang="fr"
+    )
+
+    objset2 = model.SHACLObjectSet()
+    model.RDFDeserializer().read(g, objset2)
+    # Node objects must not also be read as top-level objects
+    assert len(objset2.objects) == 1
+    e2 = objset2.find_by_id(EXT_PREFIX + "e")
+    run2 = e2[EXT_PREFIX + "run"]
+    assert isinstance(run2, model.NodeObject)
+    assert run2.id == EXT_PREFIX + "run-1"
+    # A blank node referenced only once has no identifier
+    assert all(m.id is None for m in e2[EXT_PREFIX + "metric"])
+
+    actual = model.JSONLDSerializer().serialize_data(objset2)
+    assert sort_lists(actual) == sort_lists(expect)
+
+
+def test_extensible_node_object_iri_reference(model, test_context_url):
+    # An IRI without properties of its own is still a node reference in RDF
+    DATA = ext_doc(
+        test_context_url,
+        **{EXT_PREFIX + "ref": {"@id": EXT_PREFIX + "iri-value"}},
+    )
+    objset, e = ext_value(model, DATA)
+    g = rdflib.Graph()
+    model.RDFSerializer().write(objset, g)
+    objset2 = model.SHACLObjectSet()
+    model.RDFDeserializer().read(g, objset2)
+    e2 = objset2.find_by_id(EXT_PREFIX + "e")
+    assert e2[EXT_PREFIX + "ref"] == model.IRIRef(EXT_PREFIX + "iri-value")
+
+
+def test_extensible_node_object_shared_blank_node(model, test_context_url):
+    # A blank node referenced more than once keeps its identifier, so that
+    # it is still the same node when written back
+    objset, e = ext_value(
+        model,
+        ext_doc(
+            test_context_url,
+            **{
+                EXT_PREFIX
+                + "a": {
+                    "@id": "_:shared",
+                    "@type": EXT_PREFIX + "T",
+                    EXT_PREFIX + "p": "v",
+                },
+                EXT_PREFIX + "b": {"@id": "_:shared"},
+            },
+        ),
+    )
+    assert e[EXT_PREFIX + "a"].id == "_:shared"
+
+    g = rdflib.Graph()
+    model.RDFSerializer().write(objset, g)
+    subject = rdflib.URIRef(EXT_PREFIX + "e")
+    a = g.value(subject, rdflib.URIRef(EXT_PREFIX + "a"))
+    assert isinstance(a, rdflib.BNode)
+    assert g.value(subject, rdflib.URIRef(EXT_PREFIX + "b")) == a
+
+    objset2 = model.SHACLObjectSet()
+    model.RDFDeserializer().read(g, objset2)
+    assert len(objset2.objects) == 1
+    e2 = objset2.find_by_id(EXT_PREFIX + "e")
+    a2 = e2[EXT_PREFIX + "a"]
+    b2 = e2[EXT_PREFIX + "b"]
+    assert isinstance(a2, model.NodeObject)
+    assert a2.id and a2.id.startswith("_:")
+    assert a2 == b2
+
+    g2 = rdflib.Graph()
+    model.RDFSerializer().write(objset2, g2)
+    assert len(g2) == len(g)
+
+
+def test_extensible_node_object_context(model, test_context_url):
+    # Types and property keys of node objects are expanded and compacted
+    # with the context, as for other objects
+    CONTEXT = [test_context_url, {"ex": EXT_PREFIX}]
+    DATA = ext_doc(
+        CONTEXT,
+        **{
+            "ex:node": [
+                {"@type": "ex:T", "@id": "ex:n", "ex:p": "v"},
+            ],
+        },
+    )
+    objset, e = ext_value(model, DATA)
+    assert e[EXT_PREFIX + "node"] == [
+        model.NodeObject(EXT_PREFIX + "T", EXT_PREFIX + "n", {EXT_PREFIX + "p": "v"})
+    ]
+    data = model.JSONLDSerializer().serialize_data(objset)
+    assert data["ex:node"] == [{"@type": "ex:T", "@id": "ex:n", "ex:p": ["v"]}]
+
+
+def test_extensible_node_object_create(model, tmp_path):
+    # A NodeObject can be created and written
+    e = model.extensible_class(extensible_class_required="required")
+    node = model.NodeObject(
+        EXT_PREFIX + "T",
+        properties={
+            EXT_PREFIX + "p": ["a", model.NodeObject(properties={EXT_PREFIX + "q": 1})]
+        },
+    )
+    e[EXT_PREFIX + "prop"] = node
+    objset = model.SHACLObjectSet()
+    objset.add(e)
+
+    expect = [
+        {
+            "@type": EXT_PREFIX + "T",
+            EXT_PREFIX + "p": ["a", {EXT_PREFIX + "q": [1]}],
+        }
+    ]
+    assert (
+        model.JSONLDSerializer().serialize_data(objset)[EXT_PREFIX + "prop"] == expect
+    )
+    assert (
+        json.loads(write_inline(model, objset, tmp_path))["@graph"][0][
+            EXT_PREFIX + "prop"
+        ]
+        == expect
+    )
+
+    # Values with equal content are equal and hash the same
+    assert node == model.NodeObject(
+        EXT_PREFIX + "T",
+        properties={
+            EXT_PREFIX + "p": ["a", model.NodeObject(properties={EXT_PREFIX + "q": 1})]
+        },
+    )
+    assert hash(node) == hash(model.NodeObject(EXT_PREFIX + "T"))
+    with pytest.raises(TypeError):
+        model.NodeObject(1)
+    with pytest.raises(TypeError):
+        model.NodeObject(properties=[])
+
+
+def test_extensible_node_object_known_type(model, test_context_url, tmp_path):
+    # An embedded node object whose type is a class of the model is read as
+    # an object of that class
+    DATA = ext_doc(
+        test_context_url,
+        **{
+            EXT_PREFIX
+            + "obj": [
+                {
+                    "@type": "test-class",
+                    "test-class/string-scalar-prop": "nested",
+                },
+            ],
+        },
+    )
+    objset, e = ext_value(model, DATA)
+    (obj,) = e[EXT_PREFIX + "obj"]
+    assert isinstance(obj, model.test_class)
+    assert obj.test_class_string_scalar_prop == "nested"
+    assert obj in set(objset.foreach())
+
+    data = model.JSONLDSerializer().serialize_data(objset)
+    assert data == DATA
+    assert json.loads(write_inline(model, objset, tmp_path))["@graph"] == [
+        {k: v for k, v in DATA.items() if k != "@context"}
+    ]
+
+    g = rdflib.Graph()
+    model.RDFSerializer().write(objset, g)
+    objset2 = model.SHACLObjectSet()
+    model.RDFDeserializer().read(g, objset2)
+    # The blank node must stay inline, not also be a top-level object
+    assert len(objset2.objects) == 1
+    e2 = objset2.find_by_id(EXT_PREFIX + "e")
+    (obj2,) = (
+        e2[EXT_PREFIX + "obj"]
+        if isinstance(e2[EXT_PREFIX + "obj"], list)
+        else [e2[EXT_PREFIX + "obj"]]
+    )
+    assert isinstance(obj2, model.test_class)
+    assert model.JSONLDSerializer().serialize_data(objset2) == DATA
+
+
+def test_extensible_node_object_keyword_aliases(alias_model):
+    model = alias_model
+    DATA = {
+        "@context": ALIAS_CONTEXT_URL,
+        "type": EXT_PREFIX + "test-extensible",
+        "@id": EXT_PREFIX + "e",
+        "extensible-class/required": "required",
+        EXT_PREFIX
+        + "node": {
+            "type": EXT_PREFIX + "T",
+            "spdxId": EXT_PREFIX + "n",
+            EXT_PREFIX + "p": {"@value": "1.0", "type": XSD + "decimal"},
+        },
+    }
+    objset = model.SHACLObjectSet()
+    model.JSONLDDeserializer().deserialize_data(DATA, objset)
+    (e,) = objset.objects
+    assert e[EXT_PREFIX + "node"] == model.NodeObject(
+        EXT_PREFIX + "T",
+        EXT_PREFIX + "n",
+        {EXT_PREFIX + "p": model.TypedLiteral("1.0", XSD + "decimal")},
+    )
+    data = model.JSONLDSerializer().serialize_data(objset)
+    assert data[EXT_PREFIX + "node"] == [
+        {
+            "type": EXT_PREFIX + "T",
+            "@id": EXT_PREFIX + "n",
+            EXT_PREFIX + "p": [{"@value": "1.0", "@type": XSD + "decimal"}],
+        }
+    ]
 
 
 @pytest.mark.parametrize(
@@ -2678,6 +3031,9 @@ def test_encoder_subclass_defaults(model):
         enc.write_typed_literal("1", XSD + "decimal")
     with pytest.raises(NotImplementedError):
         enc.write_lang_string("a", "en")
+    with pytest.raises(NotImplementedError):
+        with enc.write_node_object(EXT_PREFIX + "T", None, None, None):
+            pass
 
 
 @pytest.fixture(scope="module")
@@ -3509,3 +3865,39 @@ def test_custom_type_with_iri_stays_inline(model, test_context_url):
     objset2 = model.SHACLObjectSet()
     model.RDFDeserializer().read(g, objset2)
     check(objset2)
+
+
+def test_custom_type_shared_stays_inline(model, test_context_url):
+    # An object of a type the model does not define that is referenced more
+    # than once is written inline where it is first used, and referenced by
+    # its IRI elsewhere, as it may have no top-level form in the
+    # serialization (e.g. an SPDX custom extension)
+    DATA = {
+        "@context": test_context_url,
+        "@graph": [
+            {
+                "@type": "uses-extensible-abstract-class",
+                "@id": EXT_PREFIX + "a-user",
+                "uses-extensible-abstract-class/prop": {
+                    "@type": EXT_PREFIX + "custom-extension",
+                    "@id": EXT_PREFIX + "custom",
+                    EXT_PREFIX + "p": ["v"],
+                },
+            },
+            {
+                "@type": "uses-extensible-abstract-class",
+                "@id": EXT_PREFIX + "b-user",
+                "uses-extensible-abstract-class/prop": EXT_PREFIX + "custom",
+            },
+        ],
+    }
+
+    objset = model.SHACLObjectSet()
+    model.JSONLDDeserializer().deserialize_data(DATA, objset)
+    assert model.JSONLDSerializer().serialize_data(objset) == DATA
+
+    g = rdflib.Graph()
+    model.RDFSerializer().write(objset, g)
+    objset2 = model.SHACLObjectSet()
+    model.RDFDeserializer().read(g, objset2)
+    assert model.JSONLDSerializer().serialize_data(objset2) == DATA
