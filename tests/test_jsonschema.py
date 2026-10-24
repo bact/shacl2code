@@ -181,3 +181,158 @@ def test_schema_references(test_jsonschema):
                 check_refs(v, path + [f"[{idx}]"])
 
     check_refs(test_jsonschema, [])
+
+
+EMBEDDED_CONTEXT = {"test-class": "http://example.com/other"}
+
+EXTENSIBLE_OBJ = {
+    "@type": "http://example.com/extended",
+    "extensible-class/required": "foo",
+}
+
+
+@pytest.mark.parametrize(
+    "passes,data",
+    [
+        pytest.param(
+            True,
+            {**EXTENSIBLE_OBJ, "http://unknown-prop": {"http://other": "foo"}},
+            id="Root object with custom object value",
+        ),
+        pytest.param(
+            True,
+            {
+                **EXTENSIBLE_OBJ,
+                "http://unknown-prop": [
+                    "foo",
+                    1,
+                    True,
+                    None,
+                    {"@value": "foo", "@language": "en"},
+                    {"http://other": [{"http://other": "foo"}]},
+                ],
+            },
+            id="Root object with custom values",
+        ),
+        pytest.param(
+            True,
+            {"@graph": [{**EXTENSIBLE_OBJ, "http://unknown-prop": {"a": "b"}}]},
+            id="Graph object with custom object value",
+        ),
+        pytest.param(
+            False,
+            {"@graph": [{**EXTENSIBLE_OBJ, "@context": EMBEDDED_CONTEXT}]},
+            id="Graph object with context",
+        ),
+        pytest.param(
+            False,
+            {
+                "@graph": [
+                    {
+                        **EXTENSIBLE_OBJ,
+                        "@type": "extensible-class",
+                        "@context": EMBEDDED_CONTEXT,
+                    }
+                ]
+            },
+            id="Graph object of model type with context",
+        ),
+        pytest.param(
+            False,
+            {
+                "@type": "link-class",
+                "link-class-extensible": {
+                    **EXTENSIBLE_OBJ,
+                    "@context": EMBEDDED_CONTEXT,
+                },
+            },
+            id="Nested object with context",
+        ),
+        pytest.param(
+            False,
+            {
+                "@type": "uses-extensible-abstract-class",
+                "uses-extensible-abstract-class/prop": {
+                    "@type": "http://example.com/extended",
+                    "@context": EMBEDDED_CONTEXT,
+                },
+            },
+            id="Nested extensible abstract object with context",
+        ),
+        pytest.param(
+            False,
+            {
+                **EXTENSIBLE_OBJ,
+                "http://unknown-prop": {
+                    "@context": EMBEDDED_CONTEXT,
+                    "test-class": "foo",
+                },
+            },
+            id="Root object with custom value with context",
+        ),
+        pytest.param(
+            False,
+            {
+                "@graph": [
+                    {
+                        **EXTENSIBLE_OBJ,
+                        "http://unknown-prop": [
+                            "foo",
+                            {"http://other": {"@context": EMBEDDED_CONTEXT}},
+                        ],
+                    }
+                ]
+            },
+            id="Graph object with deep custom value with context",
+        ),
+        pytest.param(
+            False,
+            {
+                "@type": "link-class",
+                "link-class-extensible": {
+                    **EXTENSIBLE_OBJ,
+                    "http://unknown-prop": {"@context": EMBEDDED_CONTEXT},
+                },
+            },
+            id="Nested object with custom value with context",
+        ),
+        pytest.param(
+            False,
+            {
+                "@type": "uses-extensible-abstract-class",
+                "uses-extensible-abstract-class/prop": {
+                    "@type": "http://example.com/extended",
+                    "http://unknown-prop": {"@context": EMBEDDED_CONTEXT},
+                },
+            },
+            id="Nested extensible abstract object with custom value with context",
+        ),
+        pytest.param(
+            False,
+            {
+                "@graph": [
+                    {
+                        **EXTENSIBLE_OBJ,
+                        "http://unknown-prop": {
+                            "@type": "link-class",
+                            "@context": EMBEDDED_CONTEXT,
+                        },
+                    }
+                ]
+            },
+            id="Custom value of model type with context",
+        ),
+    ],
+)
+def test_schema_embedded_context(test_jsonschema, test_context_url, passes, data):
+    """
+    Checks that objects of extensible classes, and objects in their custom
+    properties, cannot have their own @context
+    """
+    data = {"@context": test_context_url, **data}
+
+    if passes:
+        jsonschema.validate(data, schema=test_jsonschema)
+    else:
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(data, schema=test_jsonschema)

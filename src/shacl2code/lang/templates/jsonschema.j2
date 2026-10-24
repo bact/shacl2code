@@ -48,6 +48,8 @@
                 "items": {
                     "type": "object",
                     "$ref": "#/$defs/AnyClass",
+                    {#- Only the top level object may have a context #}
+                    "not": { "required": ["@context"] },
                     "unevaluatedProperties": false
                 }
             }{%- if jss_signature %},
@@ -160,14 +162,20 @@
                 "required": ["{{ context.compact_iri("@type") }}"]
             },
             "then": {
+                {%- if class.is_extensible %}
+                {#- Properties not in the model may have any value, but may not #}
+                {#- carry an embedded context, which could redefine model terms. #}
+                {#- The context of a top level object is checked by the root schema #}
+                "properties": {
+                    "@context": true
+                },
+                "unevaluatedProperties": { "$ref": "#/$defs/NoEmbeddedContext" },
+                {%- endif %}
                 "allOf": [
                     {
                         "type": "object",
                         {%- if class.deprecated %}
                         "deprecated": true,
-                        {%- endif %}
-                        {%- if class.is_extensible %}
-                        "unevaluatedProperties": true,
                         {%- endif %}
                         "properties": {
                             "{{ class.id_property or "@id" }}": { "$ref": "#/$defs/{{ class.node_kind.split("#")[-1] }}" },
@@ -185,8 +193,11 @@
         },
         {%- endif %}
         "{{ varname(*class.clsname) }}_derived": {
-            {%- set ns = namespace(json_refs=[], named_individuals=[]) %}
+            {%- set ns = namespace(json_refs=[], named_individuals=[], extensible=false) %}
             {%- for d in get_all_derived(class) + [class._id] %}
+                {%- if classes.get(d).is_extensible %}
+                    {%- set ns.extensible = true %}
+                {%- endif %}
                 {%- if not classes.get(d).is_abstract %}
                     {%- set ns.json_refs = ns.json_refs + ["#/$defs/" + varname(*classes.get(d).clsname)] %}
                 {%- elif classes.get(d).is_extensible %}
@@ -202,8 +213,15 @@
                 {%- if ns.json_refs %}
                 {
                     "type": "object",
+                    {%- if ns.extensible %}
+                    {#- A nested object of an extensible class may not have its own #}
+                    {#- context #}
+                    "not": { "required": ["@context"] },
+                    {%- endif %}
                     {%- if not class.is_extensible %}
                     "unevaluatedProperties": false,
+                    {%- else %}
+                    "unevaluatedProperties": { "$ref": "#/$defs/NoEmbeddedContext" },
                     {%- endif %}
                     "anyOf": [
                         {%- for r in ns.json_refs %}
@@ -379,6 +397,21 @@
                 }
             },
             "required": ["{{ context.compact_iri("@type") }}"]
+        },
+        {#- Any JSON value without an embedded context at any depth #}
+        "NoEmbeddedContext": {
+            "anyOf": [
+                { "type": ["string", "number", "boolean", "null"] },
+                {
+                    "type": "array",
+                    "items": { "$ref": "#/$defs/NoEmbeddedContext" }
+                },
+                {
+                    "type": "object",
+                    "not": { "required": ["@context"] },
+                    "additionalProperties": { "$ref": "#/$defs/NoEmbeddedContext" }
+                }
+            ]
         },
         "AnyClass": {
             "anyOf": [
