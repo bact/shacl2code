@@ -1678,8 +1678,8 @@ def _lower(s: Optional[str]) -> Optional[str]:
 class NodeObject:
     """
     An embedded node object of an extensible property, whose type is not a
-    class of the model (e.g. an object of a class defined by an SPDX custom
-    extension)
+    class of the model (e.g. an object of a class defined by an extension
+    of the model)
 
     `type` is the type IRI, a tuple of type IRIs if the node has several
     types, or `None` if the node has no type. `id` is the IRI

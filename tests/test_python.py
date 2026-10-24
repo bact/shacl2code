@@ -2426,7 +2426,7 @@ def sort_lists(v):
 
 
 NODE_DATA_PROPS = {
-    # A list of several node objects, as in SPDX custom extensions
+    # A list of several node objects, as in custom extensions of a model
     EXT_PREFIX
     + "metric": [
         {
@@ -2745,7 +2745,7 @@ def test_extensible_node_object_keyword_aliases(alias_model):
         EXT_PREFIX
         + "node": {
             "type": EXT_PREFIX + "T",
-            "spdxId": EXT_PREFIX + "n",
+            "nodeId": EXT_PREFIX + "n",
             EXT_PREFIX + "p": {"@value": "1.0", "type": XSD + "decimal"},
         },
     }
@@ -3035,13 +3035,13 @@ def test_encoder_subclass_defaults(model):
 
 @pytest.fixture(scope="module")
 def alias_model(tmp_path_factory):
-    # A model whose context aliases @id and @type, as the SPDX 3 context does
+    # A model whose context aliases @id and @type
     tmp_directory = tmp_path_factory.mktemp("pythonaliascontext")
     module_name = "pymodel_alias"
 
     with TEST_CONTEXT.open("r") as f:
         ctx = json.load(f)
-    ctx["@context"]["spdxId"] = "@id"
+    ctx["@context"]["nodeId"] = "@id"
     ctx["@context"]["type"] = "@type"
     context_file = tmp_directory / "alias-context.json"
     with context_file.open("w") as f:
@@ -3079,7 +3079,7 @@ def test_extensible_keyword_aliases(alias_model):
         "type": EXT_PREFIX + "test-extensible",
         "@id": EXT_PREFIX + "e",
         "extensible-class/required": "required",
-        EXT_PREFIX + "iri-prop": {"spdxId": EXT_PREFIX + "iri-value"},
+        EXT_PREFIX + "iri-prop": {"nodeId": EXT_PREFIX + "iri-value"},
         EXT_PREFIX + "literal-prop": {"@value": "0.35", "type": XSD + "decimal"},
     }
 
@@ -3820,7 +3820,7 @@ bibo:status <http://purl.org/ontology/bibo/status/draft> .
 
 def test_custom_type_with_iri_stays_inline(model, test_context_url):
     # An object of a type the model does not define may have no top-level
-    # form in the serialization (e.g. an SPDX custom extension), so it must
+    # form in the serialization (e.g. a custom extension of the model), so it must
     # stay inline where it is used, even when it has an IRI
     DATA = {
         "@context": test_context_url,
@@ -3868,7 +3868,7 @@ def test_custom_type_shared_stays_inline(model, test_context_url):
     # An object of a type the model does not define that is referenced more
     # than once is written inline where it is first used, and referenced by
     # its IRI elsewhere, as it may have no top-level form in the
-    # serialization (e.g. an SPDX custom extension)
+    # serialization (e.g. a custom extension of the model)
     DATA = {
         "@context": test_context_url,
         "@graph": [
