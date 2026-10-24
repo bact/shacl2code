@@ -394,9 +394,37 @@
             {%- endfor %}
                 {
                     "type": "object",
+                    "propertyNames": { "$ref": "#/$defs/ContextTermName" },
                     "patternProperties": {
                         ".*": { "type": "string" }
                     }
+                }
+            ]
+        },
+        {#- A name an additional context may define. It must not be a name the #}
+        {#- model contexts define (a term, prefix or keyword alias), since that #}
+        {#- would change how model terms expand. Keywords are not allowed either #}
+        {#- (e.g. "@base", "@import", "@language"), except "@vocab", which only #}
+        {#- affects terms the model contexts do not define #}
+        "ContextTermName": {
+            "type": "string",
+            "allOf": [
+                {%- if context_reserved_names %}
+                {
+                    "not": {
+                        "enum": [
+                        {%- for name in context_reserved_names %}
+                            {{ name | tojson }}{% if not loop.last %},{% endif %}
+                        {%- endfor %}
+                        ]
+                    }
+                },
+                {%- endif %}
+                {
+                    "anyOf": [
+                        { "const": "@vocab" },
+                        { "not": { "pattern": "^@" } }
+                    ]
                 }
             ]
         }

@@ -19,6 +19,25 @@ def varname(*name):
     return name
 
 
+def context_reserved_names(context):
+    """
+    Returns the names an additional context object must not define, sorted
+
+    These are all the names defined at the top level of the model contexts:
+    terms, prefixes and keyword aliases, plus any keyword the model contexts
+    set (e.g. "@base" or "@vocab"). Redefining any of them in a later context
+    would change how the model's terms or IRIs expand.
+    """
+    names = set()
+    for ctx in context.contexts:
+        if isinstance(ctx, dict):
+            ctx = [ctx]
+        for c in ctx:
+            if isinstance(c, dict):
+                names |= set(c.keys())
+    return sorted(names)
+
+
 @language("jsonschema")
 class JsonSchemaRender(BasicJinjaRender):
     HELP = "JSON Schema"
@@ -49,4 +68,7 @@ class JsonSchemaRender(BasicJinjaRender):
         }
 
     def get_additional_render_args(self, model):
-        return self.__render_args
+        return {
+            **self.__render_args,
+            "context_reserved_names": context_reserved_names(model.context),
+        }

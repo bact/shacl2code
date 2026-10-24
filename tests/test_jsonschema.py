@@ -181,3 +181,116 @@ def test_schema_references(test_jsonschema):
                 check_refs(v, path + [f"[{idx}]"])
 
     check_refs(test_jsonschema, [])
+
+
+@pytest.mark.parametrize(
+    "passes,extra",
+    [
+        pytest.param(
+            True,
+            {"foo": "http://example.com/", "bar": "http://bar.com/"},
+            id="New prefixes",
+        ),
+        pytest.param(
+            True,
+            {"@vocab": "http://example.com/vocab/"},
+            id="Vocabulary for undefined terms",
+        ),
+        pytest.param(
+            False,
+            {"test-class": "http://example.com/other"},
+            id="Redefine class term",
+        ),
+        pytest.param(
+            False,
+            {"test-class/string-scalar-prop": "http://example.com/other"},
+            id="Redefine property term",
+        ),
+        pytest.param(
+            False,
+            {"test": "http://example.com/other/"},
+            id="Redefine prefix",
+        ),
+        pytest.param(
+            False,
+            {"foo": "http://example.com/", "test-class": "http://example.com/x"},
+            id="New prefix and redefined term",
+        ),
+        pytest.param(False, {"@base": "http://example.com/"}, id="Set base"),
+        pytest.param(
+            False, {"@import": "http://example.com/context.json"}, id="Import"
+        ),
+        pytest.param(False, {"@language": "en"}, id="Set language"),
+        pytest.param(False, {"@direction": "rtl"}, id="Set direction"),
+    ],
+)
+@pytest.mark.parametrize("first", [True, False], ids=["after", "before"])
+def test_schema_context_redefinition(
+    test_jsonschema, test_context_url, passes, extra, first
+):
+    """
+    Checks that an additional context object cannot change how the terms of
+    the model context expand
+    """
+    if first:
+        ctx = [test_context_url, extra]
+    else:
+        ctx = [extra, test_context_url]
+
+    data = {"@context": ctx, "@graph": []}
+
+    if passes:
+        jsonschema.validate(data, schema=test_jsonschema)
+    else:
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(data, schema=test_jsonschema)
+
+
+@pytest.mark.parametrize(
+    "passes,extra",
+    [
+        pytest.param(True, {"foo": "http://example.com/"}, id="New prefix"),
+        pytest.param(False, {"my-type": "http://example.com/"}, id="Type alias"),
+        pytest.param(False, {"my-id": "http://example.com/"}, id="ID alias"),
+    ],
+)
+def test_schema_context_keyword_alias(tmp_path, passes, extra):
+    """
+    Checks that a term the model context aliases to a keyword cannot be
+    redefined by an additional context object
+    """
+    context_url = "http://example.org/alias-context.json"
+    with TEST_CONTEXT.open("r") as f:
+        context = json.load(f)
+    context["@context"]["my-type"] = "@type"
+    context["@context"]["my-id"] = "@id"
+    context_file = tmp_path / "context.json"
+    with context_file.open("w") as f:
+        json.dump(context, f)
+
+    p = subprocess.run(
+        [
+            "shacl2code",
+            "generate",
+            "--input",
+            TEST_MODEL,
+            "--context-url",
+            context_file,
+            context_url,
+            "jsonschema",
+            "--output",
+            "-",
+        ],
+        check=True,
+        stdout=subprocess.PIPE,
+        encoding="utf-8",
+    )
+    schema = json.loads(p.stdout)
+
+    data = {"@context": [context_url, extra], "@graph": []}
+
+    if passes:
+        jsonschema.validate(data, schema=schema)
+    else:
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(data, schema=schema)
