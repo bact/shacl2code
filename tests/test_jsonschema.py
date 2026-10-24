@@ -299,3 +299,294 @@ def test_schema_context_keyword_alias(tmp_path, passes, extra):
     else:
         with pytest.raises(jsonschema.ValidationError):
             jsonschema.validate(data, schema=schema)
+
+
+@pytest.fixture(scope="module")
+def extra_contexts_jsonschema(model_server, test_context_url):
+    p = subprocess.run(
+        [
+            "shacl2code",
+            "generate",
+            "--input",
+            TEST_MODEL,
+            "--context",
+            test_context_url,
+            "--jss-signature",
+            "signatures",
+            "jsonschema",
+            "--allow-extra-contexts",
+            "--output",
+            "-",
+        ],
+        check=True,
+        stdout=subprocess.PIPE,
+        encoding="utf-8",
+    )
+    yield json.loads(p.stdout)
+
+
+def test_extra_contexts_off_unchanged(model_server, test_context_url, tmp_path):
+    """
+    Checks that the schema is unchanged when --allow-extra-contexts is not
+    given
+    """
+    p = subprocess.run(
+        [
+            "shacl2code",
+            "generate",
+            "--input",
+            TEST_MODEL,
+            "--context",
+            test_context_url,
+            "jsonschema",
+            "--output",
+            "-",
+        ],
+        check=True,
+        stdout=subprocess.PIPE,
+        encoding="utf-8",
+    )
+    schema = json.loads(p.stdout)
+    assert "ExtraContext" not in schema["$defs"]
+    assert "ExtensibleTypeTerm" not in schema["$defs"]
+
+
+CONTEXT_PLACEHOLDER = "@CONTEXT@"
+
+EXTRA_CONTEXT_OBJ = {
+    "ex": "http://example.com/",
+    "exProp": {"@id": "ex:foo", "@type": "@id"},
+}
+
+
+@pytest.mark.parametrize(
+    "passes,context",
+    [
+        pytest.param(True, [CONTEXT_PLACEHOLDER], id="Array"),
+        pytest.param(True, CONTEXT_PLACEHOLDER, id="Single"),
+        pytest.param(
+            True,
+            [CONTEXT_PLACEHOLDER, "http://example.com/context.jsonld"],
+            id="Context IRI",
+        ),
+        pytest.param(
+            True,
+            [CONTEXT_PLACEHOLDER, EXTRA_CONTEXT_OBJ],
+            id="Context object",
+        ),
+        pytest.param(
+            True,
+            [
+                CONTEXT_PLACEHOLDER,
+                "http://example.com/context.jsonld",
+                {"@version": 1.1, "@protected": True, **EXTRA_CONTEXT_OBJ},
+            ],
+            id="Context IRI and object",
+        ),
+        pytest.param(
+            True,
+            [
+                CONTEXT_PLACEHOLDER,
+                {
+                    "ex": "http://example.com/",
+                    "exProp": {"@id": "ex:foo", "@context": {"exSub": "ex:bar"}},
+                },
+            ],
+            id="Property-scoped context",
+        ),
+        pytest.param(
+            False,
+            ["http://example.com/context.jsonld", CONTEXT_PLACEHOLDER],
+            id="Model context not first",
+        ),
+        pytest.param(
+            False,
+            [EXTRA_CONTEXT_OBJ, CONTEXT_PLACEHOLDER],
+            id="Context object before model context",
+        ),
+        pytest.param(False, [EXTRA_CONTEXT_OBJ], id="No model context"),
+        pytest.param(False, "http://example.com/context.jsonld", id="Other IRI"),
+        pytest.param(False, [CONTEXT_PLACEHOLDER, None], id="Null context"),
+        pytest.param(False, [CONTEXT_PLACEHOLDER, "not-an-iri"], id="Relative IRI"),
+        pytest.param(False, [CONTEXT_PLACEHOLDER, 1], id="Number"),
+        pytest.param(
+            False,
+            [CONTEXT_PLACEHOLDER, {"test-class": "http://example.com/other"}],
+            id="Redefine model term",
+        ),
+        pytest.param(
+            False,
+            [CONTEXT_PLACEHOLDER, {"test-class": {"@id": "http://example.com/x"}}],
+            id="Redefine model term with term definition",
+        ),
+        pytest.param(
+            False,
+            [CONTEXT_PLACEHOLDER, {"@base": "http://example.com/"}],
+            id="Set base",
+        ),
+        pytest.param(
+            False,
+            [CONTEXT_PLACEHOLDER, {"@import": "http://example.com/context.json"}],
+            id="Import",
+        ),
+        pytest.param(
+            False,
+            [
+                CONTEXT_PLACEHOLDER,
+                {
+                    "exProp": {
+                        "@id": "http://example.com/foo",
+                        "@context": {"test-class": "http://example.com/other"},
+                    }
+                },
+            ],
+            id="Property-scoped context redefines model term",
+        ),
+        pytest.param(
+            False,
+            [
+                CONTEXT_PLACEHOLDER,
+                {
+                    "exProp": {
+                        "@id": "http://example.com/foo",
+                        "@context": [
+                            "http://example.com/context.jsonld",
+                            {"@base": "http://example.com/"},
+                        ],
+                    }
+                },
+            ],
+            id="Property-scoped context array sets base",
+        ),
+        pytest.param(
+            False,
+            [
+                CONTEXT_PLACEHOLDER,
+                {
+                    "exProp": {
+                        "@id": "http://example.com/foo",
+                        "@context": {
+                            "bar": {
+                                "@id": "http://example.com/bar",
+                                "@context": {"test": "http://example.com/x/"},
+                            }
+                        },
+                    }
+                },
+            ],
+            id="Nested property-scoped context redefines model prefix",
+        ),
+        pytest.param(
+            False,
+            [
+                CONTEXT_PLACEHOLDER,
+                {"exProp": {"@id": "http://example.com/foo", "@context": None}},
+            ],
+            id="Property-scoped null context",
+        ),
+    ],
+)
+def test_extra_contexts(extra_contexts_jsonschema, test_context_url, passes, context):
+    """
+    Checks the @context accepted with --allow-extra-contexts
+    """
+
+    def replace(c):
+        if c == CONTEXT_PLACEHOLDER:
+            return test_context_url
+        if isinstance(c, list):
+            return [replace(i) for i in c]
+        return c
+
+    data = {"@context": replace(context), "@graph": []}
+
+    if passes:
+        jsonschema.validate(data, schema=extra_contexts_jsonschema)
+    else:
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(data, schema=extra_contexts_jsonschema)
+
+
+@pytest.mark.parametrize(
+    "passes_on,passes_off,type_name",
+    [
+        pytest.param(True, True, "extensible-class", id="Model class"),
+        pytest.param(True, True, "http://example.com/extended", id="IRI"),
+        pytest.param(True, True, "ex:extended", id="Compact IRI"),
+        pytest.param(True, False, "extended", id="Term"),
+        pytest.param(False, False, "test-class", id="Other model class"),
+        pytest.param(False, False, "abstract-class", id="Abstract model class"),
+        pytest.param(False, False, "@id", id="Keyword"),
+    ],
+)
+@pytest.mark.parametrize("nested", [False, True], ids=["root", "nested"])
+def test_extra_contexts_extensible_type(
+    test_jsonschema,
+    extra_contexts_jsonschema,
+    test_context_url,
+    passes_on,
+    passes_off,
+    type_name,
+    nested,
+):
+    """
+    Checks that with --allow-extra-contexts, an extensible class may have a
+    type that is a term (no ":") defined by an additional context
+    """
+    obj = {
+        "@type": type_name,
+        "extensible-class/required": "foo",
+    }
+    if nested:
+        obj = {"@type": "link-class", "link-class-extensible": obj}
+
+    data = {
+        "@context": [
+            test_context_url,
+            {"ex": "http://example.com/", "extended": "ex:extended"},
+        ],
+        **obj,
+    }
+
+    for schema, passes in (
+        (extra_contexts_jsonschema, passes_on),
+        (test_jsonschema, passes_off),
+    ):
+        if schema is test_jsonschema:
+            # Without the option, the context object may not add term
+            # definitions, only prefixes
+            data["@context"] = [test_context_url, {"ex": "http://example.com/"}]
+
+        if passes:
+            jsonschema.validate(data, schema=schema)
+        else:
+            with pytest.raises(jsonschema.ValidationError):
+                jsonschema.validate(data, schema=schema)
+
+
+# Shared validation tests whose result is expected to differ with
+# --allow-extra-contexts
+EXTRA_CONTEXTS_CHANGED = {
+    # The model context must come first
+    "Extended context (alternate order)",
+    # A context IRI after the model context is allowed
+    "Multiple context with bad URL",
+    # Without a colon, a type is a term, which may be an extension class
+    "Nested extensible class with non-IRI type",
+}
+
+
+@jsonvalidation.validation_tests()
+def test_extra_contexts_validation(
+    request, extra_contexts_jsonschema, test_context_url, passes, data
+):
+    jsonvalidation.replace_context(data, test_context_url)
+
+    if request.node.callspec.id in EXTRA_CONTEXTS_CHANGED:
+        passes = not passes
+
+    if passes:
+        jsonschema.validate(data, schema=extra_contexts_jsonschema)
+    else:
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(data, schema=extra_contexts_jsonschema)

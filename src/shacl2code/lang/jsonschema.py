@@ -58,6 +58,20 @@ def context_reserved_names(model):
     return sorted(names)
 
 
+def class_term_reserved_names(model, reserved):
+    """
+    Returns the names without a ":" that cannot be the type term of an
+    extensible class, sorted
+
+    These are the names of all model classes, as they are written in a
+    document, and all non-keyword names the model contexts define.
+    """
+    names = set(n for n in reserved if not n.startswith("@"))
+    for c in model.classes:
+        names.add(model.context.compact_vocab(c._id))
+    return sorted(n for n in names if ":" not in n)
+
+
 @language("jsonschema")
 class JsonSchemaRender(BasicJinjaRender):
     HELP = "JSON Schema"
@@ -68,6 +82,7 @@ class JsonSchemaRender(BasicJinjaRender):
             "schema_title": args.title,
             "schema_id": args.id,
             "allow_elided_lists": args.allow_elided_lists,
+            "allow_extra_contexts": args.allow_extra_contexts,
         }
 
     @classmethod
@@ -81,6 +96,13 @@ class JsonSchemaRender(BasicJinjaRender):
             action="store_true",
             help="Allow lists to be elided if they only contain a single element",
         )
+        parser.add_argument(
+            "--allow-extra-contexts",
+            action="store_true",
+            help="Allow additional contexts (IRIs or objects) after the model"
+            " context(s) in @context, and terms as the type of extensible"
+            " classes. Additional contexts may not redefine model terms",
+        )
 
     def get_extra_env(self):
         return {
@@ -88,7 +110,9 @@ class JsonSchemaRender(BasicJinjaRender):
         }
 
     def get_additional_render_args(self, model):
+        reserved = context_reserved_names(model)
         return {
             **self.__render_args,
-            "context_reserved_names": context_reserved_names(model),
+            "context_reserved_names": reserved,
+            "class_term_reserved_names": class_term_reserved_names(model, reserved),
         }

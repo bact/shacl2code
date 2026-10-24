@@ -11,6 +11,29 @@
 
     "properties": {
         "@context": {
+        {%- if allow_extra_contexts %}
+            {#- The model contexts come first, in order, then any additional #}
+            {#- contexts #}
+            "anyOf": [
+                {%- if context.urls | length == 1 %}
+                { "const": "{{ context.urls[0] }}" },
+                {%- elif not context.urls %}
+                { "$ref": "#/$defs/ExtraContext" },
+                {%- endif %}
+                {
+                    "type": "array",
+                    {%- if context.urls %}
+                    "prefixItems": [
+                    {%- for url in context.urls %}
+                        { "const": "{{ url }}" }{% if not loop.last %},{% endif %}
+                    {%- endfor %}
+                    ],
+                    "minItems": {{ context.urls | length }},
+                    {%- endif %}
+                    "items": { "$ref": "#/$defs/ExtraContext" }
+                }
+            ]
+        {%- else %}
             "anyOf": [
                 {
                     "type": "array",
@@ -29,6 +52,7 @@
                     "$ref": "#/$defs/Context"
                 }
             ]
+        {%- endif %}
         }
     },
     {%- if context.urls %}
@@ -144,12 +168,24 @@
                     {#- Abstract Extensible classes are weird; any type _except_ the specific class type is allowed #}
                     {%- if class.is_abstract and class.is_extensible %}
                         "allOf":  [
+                            {%- if allow_extra_contexts %}
+                            {
+                                "anyOf": [
+                                    { "$ref": "#/$defs/IRI" },
+                                    { "$ref": "#/$defs/ExtensibleTypeTerm" }
+                                ]
+                            },
+                            {%- else %}
                             { "$ref": "#/$defs/IRI" },
+                            {%- endif %}
                             { "not": { "const": "{{ context.compact_vocab(class._id) }}" } }
                         ]
                     {%- elif class.is_extensible %}
                         "anyOf": [
                             { "$ref": "#/$defs/IRI" },
+                            {%- if allow_extra_contexts %}
+                            { "$ref": "#/$defs/ExtensibleTypeTerm" },
+                            {%- endif %}
                             { "const": "{{ context.compact_vocab(class._id) }}" }
                         ]
                     {%- else %}
@@ -368,6 +404,9 @@
                 "{{ context.compact_iri("@type") }}": {
                     "anyOf": [
                         { "$ref": "#/$defs/IRI" },
+                        {%- if allow_extra_contexts %}
+                        { "$ref": "#/$defs/ExtensibleTypeTerm" },
+                        {%- endif %}
                         {
                             "enum": [
                             {%- for class in concrete_classes %}
@@ -427,6 +466,72 @@
                     ]
                 }
             ]
+        }{%- if allow_extra_contexts %},
+        {#- A context after the model contexts: a remote context or a context #}
+        {#- object #}
+        "ExtraContext": {
+            "anyOf": [
+                { "$ref": "#/$defs/ContextIRI" },
+                { "$ref": "#/$defs/ContextDefinition" }
+            ]
+        },
+        "ContextIRI": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9+.-]*:"
+        },
+        {#- A context object that may define new names, but not redefine the #}
+        {#- names of the model contexts #}
+        "ContextDefinition": {
+            "type": "object",
+            "propertyNames": {
+                "anyOf": [
+                    { "$ref": "#/$defs/ContextTermName" },
+                    { "enum": ["@version", "@protected"] }
+                ]
+            },
+            "properties": {
+                "@version": { "const": 1.1 },
+                "@protected": { "type": "boolean" }
+            },
+            "additionalProperties": {
+                "anyOf": [
+                    { "type": "string" },
+                    { "$ref": "#/$defs/TermDefinition" }
+                ]
+            }
+        },
+        {#- An expanded term definition. Its own (property- or type-scoped) #}
+        {#- context has the same restrictions, as "@protected" does not stop #}
+        {#- a scoped context from redefining a term #}
+        "TermDefinition": {
+            "type": "object",
+            "properties": {
+                "@context": {
+                    "anyOf": [
+                        { "$ref": "#/$defs/ExtraContext" },
+                        {
+                            "type": "array",
+                            "items": { "$ref": "#/$defs/ExtraContext" }
+                        }
+                    ]
+                }
+            }
+        },
+        {#- A term (no ":") that an additional context may define as the type #}
+        {#- of an extensible class. It must not be a model class or a name #}
+        {#- defined by the model contexts #}
+        "ExtensibleTypeTerm": {
+            "type": "string",
+            "pattern": "^[^@:][^:]*$"{%- if class_term_reserved_names %},
+            "not": {
+                "enum": [
+                {%- for name in class_term_reserved_names %}
+                    {{ name | tojson }}{% if not loop.last %},{% endif %}
+                {%- endfor %}
+                ]
+            }
+            {%- endif %}
         }
+        {%- endif %}
     }
 }
