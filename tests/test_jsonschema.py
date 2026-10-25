@@ -188,8 +188,13 @@ def test_schema_references(test_jsonschema):
     [
         pytest.param(
             True,
-            {"foo": "http://example.com/", "bar": "http://bar.com/"},
+            {"ex1": "http://example.com/", "ex2": "http://bar.com/"},
             id="New prefixes",
+        ),
+        pytest.param(
+            False,
+            {"foo": "http://example.com/other"},
+            id="Redefine enum value name",
         ),
         pytest.param(
             True,
@@ -213,7 +218,7 @@ def test_schema_references(test_jsonschema):
         ),
         pytest.param(
             False,
-            {"foo": "http://example.com/", "test-class": "http://example.com/x"},
+            {"ex1": "http://example.com/", "test-class": "http://example.com/x"},
             id="New prefix and redefined term",
         ),
         pytest.param(False, {"@base": "http://example.com/"}, id="Set base"),
@@ -249,7 +254,7 @@ def test_schema_context_redefinition(
 @pytest.mark.parametrize(
     "passes,extra",
     [
-        pytest.param(True, {"foo": "http://example.com/"}, id="New prefix"),
+        pytest.param(True, {"ex1": "http://example.com/"}, id="New prefix"),
         pytest.param(False, {"my-type": "http://example.com/"}, id="Type alias"),
         pytest.param(False, {"my-id": "http://example.com/"}, id="ID alias"),
     ],

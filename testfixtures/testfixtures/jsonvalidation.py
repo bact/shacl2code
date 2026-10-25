@@ -137,8 +137,8 @@ def validation_tests():
                     "@context": [
                         CONTEXT,
                         {
-                            "foo": "http://example.com/",
-                            "bar": "http://bar.com/",
+                            "ex1": "http://example.com/",
+                            "ex2": "http://bar.com/",
                         },
                     ],
                     "@graph": [],
@@ -150,8 +150,8 @@ def validation_tests():
                 {
                     "@context": [
                         {
-                            "foo": "http://example.com/",
-                            "bar": "http://bar.com/",
+                            "ex1": "http://example.com/",
+                            "ex2": "http://bar.com/",
                         },
                         CONTEXT,
                     ],
@@ -165,10 +165,10 @@ def validation_tests():
                     "@context": [
                         CONTEXT,
                         {
-                            "foo": "http://example.com/",
+                            "ex1": "http://example.com/",
                         },
                         {
-                            "bar": "http://bar.com/",
+                            "ex2": "http://bar.com/",
                         },
                     ],
                     "@graph": [],
@@ -182,10 +182,10 @@ def validation_tests():
                         CONTEXT,
                         "http://foo.com",
                         {
-                            "foo": "http://example.com/",
+                            "ex1": "http://example.com/",
                         },
                         {
-                            "bar": "http://bar.com/",
+                            "ex2": "http://bar.com/",
                         },
                     ],
                     "@graph": [],
