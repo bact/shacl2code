@@ -136,3 +136,60 @@ def test_expand_compact(extra_contexts, compact):
 
     test_context(extra_contexts, compact)
     test_context(BASE_CONTEXT + extra_contexts, compact)
+
+
+@pytest.mark.parametrize(
+    "keywords",
+    [
+        pytest.param({"@version": 1.1}, id="version"),
+        pytest.param({"@protected": True}, id="protected"),
+        pytest.param({"@propagate": True}, id="propagate"),
+        pytest.param({"@language": "en", "@direction": "ltr"}, id="language"),
+        pytest.param({"@import": "http://example.com/ctx.json"}, id="import"),
+    ],
+)
+def test_context_keywords(keywords):
+    """
+    Context keywords other than "@vocab" and "@base" are not terms, and do not
+    change how terms expand or compact
+    """
+    plain = Context(TEST_CONTEXTS)
+    ctx = Context([{**keywords, **c} for c in TEST_CONTEXTS])
+
+    for term in ("root", "rootPrefix2:test", "named", "idProperty", "nonexist"):
+        assert ctx.expand_iri(term) == plain.expand_iri(term)
+        assert ctx.expand_id(term) == plain.expand_id(term)
+
+    for iri in ("http://root/property", "http://root/prefix1/prefix2/test"):
+        assert ctx.compact_iri(iri) == plain.compact_iri(iri)
+        assert ctx.compact_id(iri) == plain.compact_id(iri)
+
+    vocab = plain.expand_iri("vocabProperty")
+    assert ctx.compact_vocab("http://root/vocabPrefix/x", vocab) == "x"
+
+
+def test_context_term_keywords():
+    """
+    Keywords in an expanded term definition, such as "@protected" or "@prefix",
+    do not change what the term maps to
+    """
+    plain = Context(TEST_CONTEXTS)
+    ctx = Context(
+        [
+            {
+                name: (
+                    {**value, "@protected": True}
+                    if isinstance(value, dict)
+                    else {"@id": value, "@protected": True, "@prefix": True}
+                )
+                for name, value in c.items()
+            }
+            for c in TEST_CONTEXTS
+        ]
+    )
+
+    for term in ("root", "rootPrefix2:test", "named", "idProperty"):
+        assert ctx.expand_iri(term) == plain.expand_iri(term)
+
+    for iri in ("http://root/property", "http://root/prefix1/prefix2/test"):
+        assert ctx.compact_iri(iri) == plain.compact_iri(iri)

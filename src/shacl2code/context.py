@@ -8,8 +8,19 @@ from contextlib import contextmanager
 
 
 def foreach_context(contexts):
+    """
+    Yields the term definitions of the contexts, plus "@vocab" and "@base"
+
+    Other keywords (e.g. "@version", "@protected" or "@language") configure how
+    the context is processed and do not map a name to an IRI, so they are
+    skipped. So are terms mapped to null, which leave the name undefined.
+    """
     for ctx in contexts:
         for name, value in ctx.items():
+            if name.startswith("@") and name not in ("@vocab", "@base"):
+                continue
+            if not isinstance(value, (str, dict)):
+                continue
             yield name, value
 
 
