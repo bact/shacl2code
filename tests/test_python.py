@@ -26,7 +26,12 @@ import pytest
 
 import rdflib
 
-from shacl2code.lang.python import SHACLOBJECT_RESERVED_WORDS, check_no_shadowed_names
+from shacl2code.lang.python import (
+    PythonRender,
+    SHACLOBJECT_RESERVED_WORDS,
+    _extract_all,
+    check_no_shadowed_names,
+)
 
 from testfixtures import jsonvalidation, timetests
 
@@ -2263,7 +2268,14 @@ class TestGeneratedNameCollisions:
         <second> a sh:NodeShape, owl:Class ; rdfs:comment "defined after" .
         """)
 
-    def _generate(self, tmp_path, class_name, second_name="ZzzLater", subclass=False):
+    def _generate(
+        self,
+        tmp_path,
+        class_name,
+        second_name="ZzzLater",
+        subclass=False,
+        include_main="yes",
+    ):
         """Generate a two-class model whose first class compacts to
         class_name and second class compacts to second_name, optionally
         subclassing the first."""
@@ -2294,6 +2306,8 @@ class TestGeneratedNameCollisions:
                 ctx,
                 "https://example.com/nc.jsonld",
                 "python",
+                "--include-main",
+                include_main,
                 "--output",
                 tmp_path / "out",
             ],
@@ -2360,6 +2374,87 @@ class TestGeneratedNameCollisions:
         assert r.returncode == 0, r.stderr
         model_py = (tmp_path / "out" / "model.py").read_text()
         assert f"class ZzzLater({class_name})" in model_py
+
+    @pytest.mark.parametrize(
+        "class_name,include_main",
+        [
+            ("main", "yes"),  # star import vs `from .cmd import main`
+            ("cmd", "yes"),  # sibling submodule; __init__.py never binds it
+            ("model", "yes"),
+            ("model", "no"),
+        ],
+    )
+    def test_package_namespace_collision_is_rejected(
+        self, tmp_path, class_name, include_main
+    ):
+        r = self._generate(tmp_path, class_name, include_main=include_main)
+        assert r.returncode != 0
+        assert "__init__.py" in r.stderr
+        assert "same top-level name twice" in r.stderr
+        assert repr(class_name) in r.stderr
+        assert "line -1" not in r.stderr
+
+    @pytest.mark.parametrize("class_name", ["main", "cmd"])
+    def test_main_names_accepted_without_main(self, tmp_path, class_name):
+        r = self._generate(tmp_path, class_name, include_main="no")
+        assert r.returncode == 0, r.stderr
+
+
+class TestExtractAll:
+    def test_collects_supported_forms(self):
+        src = (
+            "__all__ = ['A']\n"
+            "__all__ += ('B',)\n"
+            "try:\n    __all__ += ['C']\nexcept ImportError:\n    pass\n"
+        )
+        assert _extract_all(src, "m.py") == ["A", "B", "C"]
+
+    def test_none_when_absent(self):
+        assert _extract_all("x = 1\n", "m.py") is None
+
+    @pytest.mark.parametrize(
+        "src", ["__all__ = names()\n", "__all__ = ['A', 1]\n"], ids=["call", "int"]
+    )
+    def test_rejects_non_literal(self, src):
+        with pytest.raises(TemplateRuntimeError, match="literal list"):
+            _extract_all(src, "m.py")
+
+    @pytest.mark.parametrize(
+        "src",
+        [
+            "if True:\n    __all__ = ['A']\n",
+            "class C:\n    __all__ = ['A']\n",
+            "__all__ += ['A']\n",
+            "try:\n    pass\nexcept E:\n    __all__ = ['A']\n",
+            "__all__ = x = ['A']\n",
+            "__all__: list = ['A']\n",
+            "__all__ = ['A']\n__all__.append('B')\n",
+            "__all__ = ['A']\n__all__.extend(['B'])\n",
+            "__all__ = ['A']\n__all__[:] = ['B']\n",
+            "__all__ = ['A']\ndel __all__\n",
+            "import os as __all__\n",
+            "from m import __all__\n",
+            "def __all__():\n    pass\n",
+        ],
+        ids=[
+            "if",
+            "class-body",
+            "augment-before-assign",
+            "except-handler",
+            "multi-target",
+            "annassign",
+            "append",
+            "extend",
+            "slice-assign",
+            "del",
+            "import-as",
+            "from-import",
+            "def",
+        ],
+    )
+    def test_rejects_unsupported_construction(self, src):
+        with pytest.raises(TemplateRuntimeError, match="unsupported __all__"):
+            _extract_all(src, "m.py")
 
 
 class TestCheckNoShadowedNames:
@@ -2533,6 +2628,97 @@ class TestCheckNoShadowedNames:
             check_no_shadowed_names(
                 "class y:\n    pass\n\n\n_ = [y := i for i in range(3)]\n", "m.py"
             )
+
+    def test_star_import_expansion(self):
+        src = "from .model import *\nfrom .cmd import main\n"
+        check_no_shadowed_names(src, "m.py", star_names={"model": ["Foo"]})
+        with pytest.raises(TemplateRuntimeError, match="'main' \\(line 1, again"):
+            check_no_shadowed_names(src, "m.py", star_names={"model": ["main"]})
+
+    @pytest.mark.parametrize(
+        "src,star_names",
+        [
+            ("from .model import *\n", None),
+            ("from .cmd import *\n", {"model": ["Foo"]}),
+            ("from .model import *\n", {"model": None}),
+            ("from model import *\n", {"model": ["Foo"]}),
+            ("from ..model import *\n", {"model": ["Foo"]}),
+            ("if X:\n    from .cmd import *\n", {"model": ["Foo"]}),
+        ],
+        ids=["no-star-names", "unrecorded", "no-all", "absolute", "level-2", "nested"],
+    )
+    def test_star_import_with_unknown_exports_raises(self, src, star_names):
+        with pytest.raises(TemplateRuntimeError, match="exports unknown"):
+            check_no_shadowed_names(src, "m.py", star_names=star_names)
+
+    @pytest.mark.parametrize("name", ["model", "cmd", "__main__"])
+    def test_package_init_prebinds_each_submodule(self, name):
+        with pytest.raises(TemplateRuntimeError, match="submodule") as e:
+            check_no_shadowed_names(
+                f"class {name}:\n    pass\n",
+                "__init__.py",
+                submodules={"model", "cmd", "__main__"},
+            )
+        assert "line -1" not in str(e.value)
+
+    def test_submodules_ignored_outside_package_init(self):
+        check_no_shadowed_names("class model:\n    pass\n", "cmd.py")
+
+    @pytest.mark.parametrize(
+        "src",
+        [
+            "def __getattr__(name):\n    pass\n",
+            "async def __getattr__(name):\n    pass\n",
+            "__getattr__ = lambda name: None\n",
+            "__getattr__: object = None\n",
+            "from ._lazy import __getattr__\n",
+            "from ._lazy import g as __getattr__\n",
+            "import _lazy as __getattr__\n",
+            "class __getattr__:\n    pass\n",
+            "if X:\n    def __getattr__(name):\n        pass\n",
+            "try:\n    from ._lazy import __getattr__\nexcept E:\n    pass\n",
+        ],
+        ids=[
+            "def",
+            "async-def",
+            "assign",
+            "annassign",
+            "from-import",
+            "from-import-as",
+            "import-as",
+            "class",
+            "if",
+            "try",
+        ],
+    )
+    def test_package_init_rejects_getattr(self, src):
+        with pytest.raises(TemplateRuntimeError, match="lazy attribute access"):
+            check_no_shadowed_names(src, "__init__.py", submodules=set())
+
+    def test_getattr_allowed_outside_package_init(self):
+        check_no_shadowed_names("def __getattr__(name):\n    pass\n", "m.py")
+
+
+@pytest.mark.parametrize("include_main", ["yes", "no"])
+def test_python_render_package_init(tmp_path, include_main):
+    """Every __init__.* file is a package init, never its own submodule."""
+
+    class Render(PythonRender):
+        FILES = PythonRender.FILES + ("__init__.pyi",)
+
+    args = types.SimpleNamespace(
+        license="MIT",
+        output=tmp_path,
+        use_slots="auto",
+        include_main=include_main,
+        version=None,
+    )
+    r = Render(args)
+    assert r._PythonRender__submodules == (
+        {"model", "cmd", "__main__"} if include_main == "yes" else {"model"}
+    )
+    with pytest.raises(TemplateRuntimeError, match="'model' submodule"):
+        r.validate_render("class model:\n    pass\n", "__init__.pyi.j2")
 
 
 def test_extensible_properties(model, test_context_url):

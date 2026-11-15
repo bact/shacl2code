@@ -251,7 +251,7 @@ def _reject_module_walrus(tree, filename):
     walk(tree)
 
 
-def _scope_bindings(body, filename=None, prebound=None):
+def _scope_bindings(body, filename=None, prebound=None, star_names=None):
     """Names a statement list binds, as ({name: lineno}, duplicates).
 
     Only understands the module-level statement kinds the Python templates
@@ -275,9 +275,13 @@ def _scope_bindings(body, filename=None, prebound=None):
     is briefly bound to a `_Feature` object), so a class reusing that name
     later harmlessly replaces a value nothing else in the module reads.
 
-    prebound seeds the returned scope with pre-existing bindings (pre-bound
-    builtins, with lineno 0 as a "no real line" sentinel); only meaningful
-    on the outermost call, since nested calls merge into the caller's scope.
+    star_names maps a module name to the names ``from .<module> import *``
+    binds; any other star import raises.
+
+    prebound seeds the returned scope with pre-existing bindings, keyed by a
+    sentinel lineno (0: a used builtin, -1: a sibling submodule); only
+    meaningful on the outermost call, since nested calls merge into the
+    caller's scope.
     """
     names: dict = dict(prebound) if prebound else {}
     dups: list = []
@@ -291,7 +295,7 @@ def _scope_bindings(body, filename=None, prebound=None):
     def branches(*bodies):
         merged: dict = {}
         for b in bodies:
-            sub_names, sub_dups = _scope_bindings(b, filename)
+            sub_names, sub_dups = _scope_bindings(b, filename, star_names=star_names)
             dups.extend(sub_dups)
             for n, lineno in sub_names.items():
                 merged.setdefault(n, lineno)
@@ -320,6 +324,13 @@ def _scope_bindings(body, filename=None, prebound=None):
             for a in stmt.names:
                 if a.name != "*":
                     add(a.asname or a.name, stmt.lineno)
+                    continue
+                exported = (star_names or {}).get(stmt.module)
+                if stmt.level != 1 or exported is None:
+                    src = "." * stmt.level + (stmt.module or "")
+                    unsupported(stmt, f"`from {src} import *`, exports unknown")
+                for n in exported:
+                    add(n, stmt.lineno)
         elif isinstance(stmt, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
             is_def = not isinstance(stmt, ast.ClassDef)
             # A run of @overload defs and the def after it bind one name.
@@ -350,7 +361,66 @@ def _scope_bindings(body, filename=None, prebound=None):
     return names, dups
 
 
-def check_no_shadowed_names(text: str, filename: str, class_iris=None) -> None:
+def _extract_all(text: str, filename: str):
+    """The names a module's static ``__all__`` lists, or None if it has none.
+
+    Supports only ``__all__ = [...]`` and ``__all__ += [...]`` of string
+    literals, at module level or in a module-level try body. Any other
+    mention of the name __all__ raises. Dynamic access such as
+    ``globals()["__all__"]`` isn't detected.
+    """
+    tree = ast.parse(text, filename=filename)
+    names = None
+    collected = 0
+
+    def collect(node):
+        nonlocal names, collected
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target, op = node.targets[0], "="
+        elif isinstance(node, ast.AugAssign) and isinstance(node.op, ast.Add):
+            target, op = node.target, "+="
+        else:
+            return
+        if not (isinstance(target, ast.Name) and target.id == "__all__"):
+            return
+        if op == "+=" and names is None:
+            return  # unsupported; the mention count below raises
+        if not (
+            isinstance(node.value, (ast.List, ast.Tuple))
+            and all(
+                isinstance(e, ast.Constant) and isinstance(e.value, str)
+                for e in node.value.elts
+            )
+        ):
+            raise TemplateRuntimeError(
+                f"{filename}: line {node.lineno}: __all__ {op} ... must be "
+                "a literal list/tuple of strings"
+            )
+        entries = [e.value for e in node.value.elts]
+        names = entries if op == "=" else names + entries
+        collected += 1
+
+    for node in tree.body:
+        collect(node)
+        if isinstance(node, ast.Try):
+            for sub in node.body:
+                collect(sub)
+
+    # Each identifier spelled __all__ (name, def, class, import, alias)
+    # must be one collected above.
+    mentions = sum(
+        "__all__" in (getattr(n, "id", None), getattr(n, "name", None))
+        or getattr(n, "asname", None) == "__all__"
+        for n in ast.walk(tree)
+    )
+    if mentions != collected:
+        raise TemplateRuntimeError(f"{filename}: unsupported __all__ construction")
+    return names
+
+
+def check_no_shadowed_names(
+    text: str, filename: str, class_iris=None, star_names=None, submodules=None
+) -> None:
     """Reject generated Python that binds one top-level name twice.
 
     A model-derived class or constant landing on a name the module already
@@ -364,6 +434,12 @@ def check_no_shadowed_names(text: str, filename: str, class_iris=None) -> None:
     class_iris, if given, maps a model class's Python name to its source
     IRI(s), to name in the error; loads inside those classes don't count as
     builtin uses (see _used_builtins).
+
+    star_names is as in _scope_bindings. submodules, if not None, marks the
+    text as a package's __init__ and lists its sibling module names: Python
+    binds each as a package attribute once anything imports it, so all of
+    them count as bound. A package __init__ binding __getattr__ raises, as
+    lazy attribute access isn't modeled.
     """
     try:
         tree = ast.parse(text, filename=filename)
@@ -375,7 +451,17 @@ def check_no_shadowed_names(text: str, filename: str, class_iris=None) -> None:
     _reject_module_walrus(tree, filename)
 
     prebound = {n: 0 for n in _used_builtins(tree, class_iris or ())}
-    _, dups = _scope_bindings(tree.body, filename, prebound=prebound)
+    for n in submodules or ():
+        prebound.setdefault(n, -1)
+    names, dups = _scope_bindings(
+        tree.body, filename, prebound=prebound, star_names=star_names
+    )
+    if submodules is not None and "__getattr__" in names:
+        raise TemplateRuntimeError(
+            f"{filename}: line {names['__getattr__']}: package __init__ binds "
+            "__getattr__; the name-collision check does not model lazy "
+            "attribute access"
+        )
     if dups:
 
         def describe(n, first, second):
@@ -383,6 +469,11 @@ def check_no_shadowed_names(text: str, filename: str, class_iris=None) -> None:
                 loc = (
                     f"{n!r} shadows a builtin used by the generated code "
                     f"(line {second})"
+                )
+            elif first == -1:
+                loc = (
+                    f"{n!r} shadows this package's {n!r} submodule, which "
+                    f"Python binds as a package attribute (line {second})"
                 )
             else:
                 loc = f"{n!r} (line {first}, again on line {second})"
@@ -407,11 +498,14 @@ class PythonRender(JinjaTemplateRender):
 
     HELP = "Python Language Bindings"
 
+    # model.py renders before __init__.py, whose `from .model import *`
+    # validate_render expands from model.py's __all__.
     FILES = (
-        "__init__.py",
         "model.py",
         "model.pyi",
+        "__init__.py",
     )
+    MAIN_FILES = ("cmd.py", "cmd.pyi", "__main__.py")
 
     def __init__(self, args):
         super().__init__(args)
@@ -424,6 +518,10 @@ class PythonRender(JinjaTemplateRender):
         else:
             self.__version = ""
         self.__class_iris = {}
+        # Rendered .py module stem -> its static __all__.
+        self.__module_all = {}
+        files = self.FILES + (self.MAIN_FILES if self.__include_main else ())
+        self.__submodules = {Path(f).stem for f in files} - {"__init__"}
 
     @classmethod
     def get_arguments(cls, parser):
@@ -465,9 +563,8 @@ class PythonRender(JinjaTemplateRender):
             yield get_file(s)
 
         if self.__include_main:
-            yield get_file("cmd.py")
-            yield get_file("cmd.pyi")
-            yield get_file("__main__.py")
+            for s in self.MAIN_FILES:
+                yield get_file(s)
 
     def get_extra_env(self):
         return {
@@ -480,10 +577,20 @@ class PythonRender(JinjaTemplateRender):
     def validate_render(self, text, name):
         # Backstop for every generated module: a model name landing on a
         # name the module already binds would otherwise silently shadow it.
-        if name.endswith((".py.j2", ".pyi.j2")):
-            check_no_shadowed_names(
-                text, name[: -len(".j2")], class_iris=self.__class_iris
-            )
+        if not name.endswith((".py.j2", ".pyi.j2")):
+            return
+        filename = name[: -len(".j2")]
+        stem, suffix = Path(filename).stem, Path(filename).suffix
+        check_no_shadowed_names(
+            text,
+            filename,
+            class_iris=self.__class_iris,
+            # Stubs' __all__ isn't recorded, so a stub's star import raises.
+            star_names=self.__module_all if suffix == ".py" else None,
+            submodules=self.__submodules if stem == "__init__" else None,
+        )
+        if suffix == ".py" and stem != "__init__":
+            self.__module_all[stem] = _extract_all(text, filename)
 
     def get_additional_render_args(self, model):
         self.__class_iris = {}
