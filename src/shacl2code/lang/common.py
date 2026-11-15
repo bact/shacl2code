@@ -86,9 +86,14 @@ class JinjaTemplateRender(object):
             **render_args,
         )
 
+        self.validate_render(render, template.name)
+
         output.write(render)
         if not render[-1] == "\n":
             output.write("\n")
+
+    def validate_render(self, text, name):
+        """Hook to reject invalid generated output before it is written."""
 
     def output(self, model):
         """

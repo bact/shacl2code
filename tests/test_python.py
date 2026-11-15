@@ -16,6 +16,8 @@ import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from jinja2 import TemplateRuntimeError
+
 import jsonschema
 
 import pyshacl
@@ -24,7 +26,7 @@ import pytest
 
 import rdflib
 
-from shacl2code.lang.python import SHACLOBJECT_RESERVED_WORDS
+from shacl2code.lang.python import SHACLOBJECT_RESERVED_WORDS, check_no_shadowed_names
 
 from testfixtures import jsonvalidation, timetests
 
@@ -2238,6 +2240,299 @@ def test_reserved_words_cover_shaclobject_names(model):
     assert required, "found no class-level names to check"
     missing = sorted(required - SHACLOBJECT_RESERVED_WORDS)
     assert not missing, f"not in SHACLOBJECT_RESERVED_WORDS: {missing}"
+
+
+class TestGeneratedNameCollisions:
+    """
+    A class name landing on a name the generated module already binds must
+    fail generation, not silently shadow it.
+    """
+
+    COLLIDE_TTL = textwrap.dedent("""\
+        @base <http://example.org/nc/> .
+        @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+        @prefix sh: <http://www.w3.org/ns/shacl#> .
+        @prefix owl: <http://www.w3.org/2002/07/owl#> .
+
+        <http://example.org/nc> a owl:Ontology ;
+            rdfs:comment "name collision" ;
+            rdfs:label "nc" ;
+            owl:versionInfo "1.0.0" .
+
+        <first> a sh:NodeShape, owl:Class ; rdfs:comment "collides" .
+        <second> a sh:NodeShape, owl:Class ; rdfs:comment "defined after" .
+        """)
+
+    def _generate(self, tmp_path, class_name, second_name="ZzzLater", subclass=False):
+        """Generate a two-class model whose first class compacts to
+        class_name and second class compacts to second_name, optionally
+        subclassing the first."""
+        ttl = tmp_path / "nc.ttl"
+        ttl.write_text(
+            self.COLLIDE_TTL
+            + ("<second> rdfs:subClassOf <first> .\n" if subclass else "")
+        )
+        ctx = tmp_path / "nc-context.json"
+        ctx.write_text(
+            json.dumps(
+                {
+                    "@context": {
+                        "@base": "http://example.org/nc/",
+                        class_name: "http://example.org/nc/first",
+                        second_name: "http://example.org/nc/second",
+                    }
+                }
+            )
+        )
+        return subprocess.run(
+            [
+                "shacl2code",
+                "generate",
+                "--input",
+                ttl,
+                "--context-url",
+                ctx,
+                "https://example.com/nc.jsonld",
+                "python",
+                "--output",
+                tmp_path / "out",
+            ],
+            encoding="utf-8",
+            capture_output=True,
+        )
+
+    @pytest.mark.parametrize(
+        "class_name",
+        [
+            # Classes the template defines
+            "Property",
+            "Ontology",
+            "SHACLObjectSet",
+            # A name the template imports
+            "Optional",
+            # Builtins the template uses (type hints, isinstance() checks)
+            "str",
+            "isinstance",
+            "slice",
+        ],
+    )
+    def test_colliding_class_name_is_rejected(self, tmp_path, class_name):
+        r = self._generate(tmp_path, class_name)
+        assert r.returncode != 0
+        assert "model.py" in r.stderr
+        assert "same top-level name twice" in r.stderr
+        assert repr(class_name) in r.stderr
+
+    def test_non_colliding_class_name_is_allowed(self, tmp_path):
+        # Bound only as _TYPE_CHECKING, so a class may use the plain name.
+        r = self._generate(tmp_path, "TYPE_CHECKING")
+        assert r.returncode == 0, r.stderr
+
+    def test_annotations_class_name_is_accepted(self, tmp_path):
+        # `from __future__ import annotations` is a compiler directive, not
+        # a real runtime name a class could meaningfully collide with.
+        r = self._generate(tmp_path, "annotations")
+        assert r.returncode == 0, r.stderr
+
+    def test_two_iris_collide_on_python_name(self, tmp_path):
+        """'a-b' and 'a_b' both compact to the Python name 'a_b'."""
+        r = self._generate(tmp_path, "a-b", "a_b")
+        assert r.returncode != 0
+        assert "model.py" in r.stderr
+        assert "same top-level name twice" in r.stderr
+        assert repr("a_b") in r.stderr
+        # Both source classes are named so the user knows what to rename.
+        assert "http://example.org/nc/first" in r.stderr
+        assert "http://example.org/nc/second" in r.stderr
+
+    def test_stub_only_collision_is_rejected(self, tmp_path):
+        """model.pyi imports ABCMeta; model.py doesn't."""
+        r = self._generate(tmp_path, "ABCMeta")
+        assert r.returncode != 0
+        assert "model.pyi" in r.stderr
+        assert repr("ABCMeta") in r.stderr
+
+    @pytest.mark.parametrize("class_name", ["Warning", "ExceptionGroup"])
+    def test_subclassed_builtin_named_class_is_accepted(self, tmp_path, class_name):
+        """A builtin the generated code doesn't use may name a model class,
+        even one another model class refers to."""
+        r = self._generate(tmp_path, class_name, subclass=True)
+        assert r.returncode == 0, r.stderr
+        model_py = (tmp_path / "out" / "model.py").read_text()
+        assert f"class ZzzLater({class_name})" in model_py
+
+
+class TestCheckNoShadowedNames:
+    """Unit tests for the AST backstop, no code generation."""
+
+    def test_accepts_names_bound_once(self):
+        check_no_shadowed_names(
+            "from typing import Optional\nx: Optional[int]\n", "m.py"
+        )
+
+    def test_accepts_same_name_in_exclusive_branches(self):
+        """if/else and try/except arms are alternatives, not redefinitions."""
+        check_no_shadowed_names(
+            "import sys\n"
+            "if sys.version_info >= (3, 10):\n"
+            "    from typing import TypeAlias\n"
+            "else:\n"
+            "    from typing_extensions import TypeAlias\n",
+            "m.py",
+        )
+        check_no_shadowed_names(
+            "try:\n    import ujson as json\nexcept ImportError:\n    import json\n",
+            "m.py",
+        )
+
+    def test_accepts_overloads(self):
+        check_no_shadowed_names(
+            "from typing import overload\n"
+            "@overload\ndef f(x: int) -> int: ...\n"
+            "@overload\ndef f(x: str) -> str: ...\n"
+            "def f(x): return x\n",
+            "m.py",
+        )
+
+    @pytest.mark.parametrize(
+        "src",
+        [
+            "import os.path\nclass os: pass\n",
+            "import json as j\nclass j: pass\n",
+            "a, (b, c) = 1, (2, 3)\nclass c: pass\n",
+            "[a, b] = 1, 2\nclass b: pass\n",
+            "a, *b = 1, 2\nclass b: pass\n",
+            "x: int = 1\nclass x: pass\n",
+            "@overload\ndef f(x: int) -> int: ...\nclass f: pass\n",
+            "class f: pass\n@overload\ndef f(x: int) -> int: ...\n",
+        ],
+        ids=[
+            "dotted-import",
+            "import-as",
+            "tuple-target",
+            "list-target",
+            "starred-target",
+            "annassign",
+            "overload-then-class",
+            "class-then-overload",
+        ],
+    )
+    def test_rejects_rebinding(self, src):
+        with pytest.raises(TemplateRuntimeError, match="same top-level name twice"):
+            check_no_shadowed_names(src, "m.py")
+
+    def test_rejects_redefinition(self):
+        with pytest.raises(TemplateRuntimeError, match="same top-level name twice"):
+            check_no_shadowed_names(
+                "from typing import Optional\nclass Optional:\n    pass\n", "m.py"
+            )
+
+    def test_rejects_invalid_python(self):
+        with pytest.raises(TemplateRuntimeError, match="generated invalid Python"):
+            check_no_shadowed_names("class (:\n", "m.py")
+
+    def test_rejects_try_else_duplicate(self):
+        """try-body and orelse run as one sequential path, so rebinding in
+        orelse a name bound in the try body is a duplicate."""
+        with pytest.raises(TemplateRuntimeError, match="same top-level name twice"):
+            check_no_shadowed_names(
+                "try:\n    x = 1\nexcept E:\n    pass\nelse:\n    x = 2\n", "m.py"
+            )
+
+    def test_accepts_try_except_alternative(self):
+        """The try body and an except handler are alternative paths."""
+        check_no_shadowed_names(
+            "try:\n    x = 1\nexcept Exception:\n    x = 2\n", "m.py"
+        )
+
+    # ExceptionGroup: a builtin on 3.11+ only, rejected on every Python.
+    @pytest.mark.parametrize("name", ["str", "ExceptionGroup"])
+    def test_rejects_used_builtin_shadow(self, name):
+        """A builtin the module loads (even inside a function body) and
+        also rebinds at module level is a duplicate."""
+        with pytest.raises(TemplateRuntimeError, match="shadows a builtin"):
+            check_no_shadowed_names(
+                f"def f(x):\n    return isinstance(x, {name})\n\n\n"
+                f"class {name}:\n    pass\n",
+                "m.py",
+            )
+
+    def test_accepts_unused_builtin_shadow(self):
+        """A builtin name the module never loads may be freely rebound."""
+        check_no_shadowed_names("class str:\n    pass\n", "m.py")
+
+    @pytest.mark.parametrize(
+        "src",
+        [
+            "def f(id):\n    return id\n",
+            "_ = [id for id in range(3)]\n",
+        ],
+        ids=["parameter", "comprehension"],
+    )
+    def test_accepts_locally_shadowed_builtin(self, src):
+        """A load of a local that shadows a builtin isn't a builtin use."""
+        check_no_shadowed_names(src + "class id:\n    pass\n", "m.py")
+
+    def test_accepts_future_annotations_shadow(self):
+        """`from __future__ import annotations` is a compile-time directive;
+        a class reusing its bound name is not a real collision."""
+        check_no_shadowed_names(
+            "from __future__ import annotations\n\n\nclass annotations:\n    pass\n",
+            "m.py",
+        )
+
+    @pytest.mark.parametrize(
+        "label,src",
+        [
+            ("for", "for x in range(3):\n    pass\n"),
+            ("while", "while True:\n    pass\n"),
+            ("with", "with open('f') as x:\n    pass\n"),
+            ("try-finally", "try:\n    pass\nfinally:\n    pass\n"),
+            ("except-as", "try:\n    pass\nexcept Exception as e:\n    pass\n"),
+            ("walrus", "(y := 1)\n"),
+            ("walrus-comprehension", "_ = [y := i for i in range(3)]\n"),
+            (
+                "walrus-genexp",
+                "_ = (i for i in range(3) if (y := i))\n",
+            ),
+            ("walrus-def-default", "def f(x=(y := 1)):\n    pass\n"),
+            ("walrus-decorator", "@(d := staticmethod)\ndef f():\n    pass\n"),
+            ("walrus-class-base", "class C((B := object)):\n    pass\n"),
+            ("global", "global x\n"),
+            pytest.param(
+                "match",
+                "match x:\n    case _:\n        pass\n",
+                marks=pytest.mark.skipif(
+                    sys.version_info < (3, 10), reason="match needs Python 3.10+"
+                ),
+            ),
+            pytest.param(
+                "try-star",
+                "try:\n    pass\nexcept* ValueError:\n    pass\n",
+                marks=pytest.mark.skipif(
+                    sys.version_info < (3, 11), reason="except* needs Python 3.11+"
+                ),
+            ),
+            pytest.param(
+                "type-alias",
+                "type X = int\n",
+                marks=pytest.mark.skipif(
+                    sys.version_info < (3, 12), reason="type alias needs Python 3.12+"
+                ),
+            ),
+        ],
+    )
+    def test_rejects_unsupported_statement(self, label, src):
+        with pytest.raises(TemplateRuntimeError, match="does not understand"):
+            check_no_shadowed_names(src, "m.py")
+
+    def test_walrus_in_comprehension_is_not_a_scope_boundary(self):
+        """PEP 572 binds a walrus in a comprehension at module scope, where
+        it would collide with class y; it is rejected outright."""
+        with pytest.raises(TemplateRuntimeError, match="does not understand"):
+            check_no_shadowed_names(
+                "class y:\n    pass\n\n\n_ = [y := i for i in range(3)]\n", "m.py"
+            )
 
 
 def test_extensible_properties(model, test_context_url):
