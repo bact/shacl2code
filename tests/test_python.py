@@ -267,7 +267,7 @@ class TestCheckType:
         output_dir = tmp_path / "pymodel"
         shacl2code_generate(args, python_args, output_dir)
         subprocess.run(
-            ["pyrefly", "check", "--search-path", tmp_path]
+            ["pyrefly", "check", "-p", "default", "--search-path", tmp_path]
             + list(output_dir.iterdir()),
             encoding="utf-8",
             check=True,
@@ -374,11 +374,50 @@ class TestUsageType:
     def test_pyrefly(self, python_usage_script):
         env, script_path = python_usage_script
         subprocess.run(
-            ["pyrefly", "check", script_path],
+            ["pyrefly", "check", "-p", "default", script_path],
             encoding="utf-8",
             env=env,
             check=True,
         )
+
+
+@pytest.mark.parametrize(
+    "mistake",
+    [
+        "o.link_class_link_list_prp",
+        "{module}.link_clas",
+    ],
+)
+@pytest.mark.parametrize(
+    "checker",
+    [
+        ["mypy"],
+        ["pyright"],
+        ["pyrefly", "check", "-p", "default"],
+    ],
+    ids=lambda c: c[0],
+)
+def test_usage_type_error(python_model_env, tmp_path, checker, mistake):
+    """
+    A typo on a generated class or module is reported by each type checker
+    """
+    env, module_name = python_model_env
+
+    script_path = tmp_path / "script.py"
+    script_path.write_text(
+        "import {m}\n\n\ndef f(o: {m}.link_class) -> None:\n    {x}\n".format(
+            m=module_name, x=mistake.format(module=module_name)
+        )
+    )
+
+    p = subprocess.run(
+        checker + [script_path],
+        encoding="utf-8",
+        env=env,
+        capture_output=True,
+    )
+    assert p.returncode != 0, p.stdout
+    assert "script.py:5" in p.stdout, p.stdout
 
 
 def check_file(p, expect, digest):
