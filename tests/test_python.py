@@ -31,6 +31,7 @@ from shacl2code.lang.python import (
 from shacl2code.model import Class
 
 from testfixtures import jsonvalidation, timetests
+from testfixtures.pygen import run_stubtest, shacl2code_generate
 
 THIS_FILE = Path(__file__)
 THIS_DIR = THIS_FILE.parent
@@ -42,6 +43,8 @@ TEST_MODEL = THIS_DIR / "data" / "model" / "test.ttl"
 
 TEST_CONTEXT = THIS_DIR / "data" / "model" / "test-context.json"
 
+STUBTEST_ALLOWLIST = DATA_DIR / "stubtest" / "allow.txt"
+
 SPDX3_CONTEXT_URL = "https://spdx.github.io/spdx-3-model/context.json"
 
 TEST_TZ = timezone(timedelta(hours=-2), name="TST")
@@ -51,63 +54,6 @@ MODEL_VERSION = "1.0.0.alpha"
 VALIDATION_ERROR = object()
 
 ENCODE_ERROR = object()
-
-
-def shacl2code_generate(args, python_args, outfile):
-    p = subprocess.run(
-        [
-            "shacl2code",
-            "generate",
-        ]
-        + args
-        + ["python"]
-        + python_args
-        + [
-            "--output",
-            outfile,
-        ],
-        check=True,
-        stdout=subprocess.PIPE,
-        encoding="utf-8",
-    )
-
-    # Add a py.typed file for type checking
-    (outfile / "py.typed").touch()
-    return p
-
-
-def run_stubtest(tmp_path, module_name):
-    """
-    Run mypy stubtest against a generated package the same way
-    TestCheckType.test_stubtest does: empty allowlist, no ignore flags.
-
-    `module_name` must be the name of a generated package directory directly
-    under `tmp_path` (e.g. produced by shacl2code_generate(..., tmp_path /
-    module_name)).
-    """
-    pythonpath = os.environ.get("PYTHONPATH")
-    if pythonpath:
-        pythonpath = os.pathsep.join([str(tmp_path), pythonpath])
-    else:
-        pythonpath = str(tmp_path)
-
-    env = os.environ.copy()
-    env["PYTHONPATH"] = pythonpath
-
-    # No --ignore-missing-stub: a new public symbol must get a stub.
-    # No --ignore-unused-allowlist: a stale allowlist entry must be
-    # removed instead of silently hiding whatever it matches next.
-    subprocess.run(
-        [
-            "stubtest",
-            module_name,
-            "--allow",
-            DATA_DIR / "stubtest" / "allow.txt",
-        ],
-        encoding="utf-8",
-        check=True,
-        env=env,
-    )
 
 
 @pytest.fixture(scope="module")
@@ -273,7 +219,7 @@ class TestCheckType:
         """
         output_dir = tmp_path / "pymodel"
         shacl2code_generate(args, python_args, output_dir)
-        run_stubtest(tmp_path, "pymodel")
+        run_stubtest(tmp_path, "pymodel", STUBTEST_ALLOWLIST)
 
     def test_pyrefly(self, tmp_path, args, python_args):
         """
@@ -340,7 +286,7 @@ def test_stubtest_extensible_derived(tmp_path):
     """
     output_dir = tmp_path / "extdrvmodel"
     shacl2code_generate(["--input", EXTENSIBLE_DERIVED_MODEL], [], output_dir)
-    run_stubtest(tmp_path, "extdrvmodel")
+    run_stubtest(tmp_path, "extdrvmodel", STUBTEST_ALLOWLIST)
 
 
 def _class(_id, parent_ids=(), is_extensible=False):
